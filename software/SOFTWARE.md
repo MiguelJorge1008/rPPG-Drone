@@ -1,163 +1,163 @@
 # Drone rPPG — Software
 
-Software de aquisição de vídeo e deteção facial para extração de sinais rPPG (remote Photoplethysmography) a partir de um drone equipado com câmara XIAO ESP32.
+Video acquisition and face detection software for rPPG (remote Photoplethysmography) signal extraction from a drone equipped with a XIAO ESP32-S3 camera.
 
 ---
 
-## Estrutura de ficheiros
+## File Structure
 
 ```
 software/
-├── main.py                  # Ponto de entrada: seleciona fonte e algoritmo
+├── main.py                  # Entry point: selects video source and algorithm
 ├── DataHandler.py           # CameraHandler, WebcamHandler, IMUHandler
-├── Processor.py             # Deteção facial, ROI, filtros, HR em tempo real
+├── Processor.py             # Face detection, ROI, filters, real-time HR
 ├── algoritmos/
-│   ├── green.py             # Algoritmo GREEN (Verkruysse 2008)
-│   ├── omit.py              # Algoritmo OMIT (Casado & López 2023)
-│   ├── pos_wang.py          # Algoritmo POS (Wang et al. 2017)
-│   └── adaptive_lms.py      # Filtro NLMS adaptativo com IMU (drone only)
+│   ├── green.py             # GREEN algorithm (Verkruysse 2008)
+│   ├── omit.py              # OMIT algorithm (Casado & López 2023)
+│   ├── pos_wang.py          # POS algorithm (Wang et al. 2017)
+│   └── adaptive_lms.py      # Adaptive NLMS filter with IMU (drone only)
 └── SOFTWARE.md
 ```
 
 ---
 
-## Pipeline rPPG
+## rPPG Pipeline
 
 ```
-Frame (câmara / webcam)
-  → MediaPipe FaceMesh (deteção facial)
-  → ROI testa (4 landmarks) → média RGB por frame
+Frame (camera / webcam)
+  → MediaPipe FaceMesh (face detection)
+  → Forehead ROI (4 landmarks) → mean RGB per frame
   → rgb_signal  (N, 3)
-  → [GREEN / OMIT / POS_WANG / LMS]  →  BVP bruto  (N,)
-  → apply_filters  →  BVP filtrado  (N,)
+  → [GREEN / OMIT / POS_WANG / LMS]  →  raw BVP  (N,)
+  → apply_filters  →  filtered BVP  (N,)
   → estimate_hr  →  BPM  (FFT, range 45–240 bpm)
 ```
 
 ---
 
-## Ficheiros
+## Files
 
 ### `main.py`
 
-Ponto de entrada. Pergunta ao utilizador a fonte de vídeo e o algoritmo rPPG, instancia os handlers e arranca o loop principal.
+Entry point. Prompts the user for the video source and rPPG algorithm, instantiates the handlers and starts the main loop.
 
-- **Fonte A — Drone:** `CameraHandler` (stream MJPEG) + `IMUHandler` (polling `/imu`); IP fixo `http://192.168.4.1`
-- **Fonte B — Webcam:** `WebcamHandler` (OpenCV VideoCapture local)
-- **Algoritmos disponíveis:** GREEN, OMIT, POS_WANG, LMS (LMS só disponível no modo drone, requer IMU)
+- **Source A — Drone:** `CameraHandler` (MJPEG stream) + `IMUHandler` (polling `/imu`); fixed IP `http://192.168.4.1`
+- **Source B — Webcam:** `WebcamHandler` (local OpenCV VideoCapture)
+- **Available algorithms:** GREEN, OMIT, POS_WANG, LMS (LMS only available in drone mode, requires IMU)
 
 ---
 
 ### `DataHandler.py`
 
-Três classes de aquisição de dados.
+Three data acquisition classes.
 
-**Classe: `CameraHandler`** — stream MJPEG da câmara do drone
+**Class: `CameraHandler`** — MJPEG stream from the drone camera
 
-| Método | Descrição |
-|---|---|
-| `__init__(base_url)` | Inicia a ligação e arranca a thread de captura |
-| `update()` | Thread contínua que lê o stream MJPEG, extrai frames JPEG e guarda o último frame |
-| `get_frame()` | Devolve o último frame capturado (`None` se ainda não houver) |
-| `stop()` | Para a thread de captura |
+| Method | Description |
+|--------|-------------|
+| `__init__(base_url)` | Opens the connection and starts the capture thread |
+| `update()` | Continuous thread that reads the MJPEG stream, extracts JPEG frames and stores the latest one |
+| `get_frame()` | Returns the latest captured frame (`None` if not yet available) |
+| `stop()` | Stops the capture thread |
 
-**Detalhes técnicos:**
-- Stream lido via `requests` com `stream=True`
-- Frames JPEG extraídos do buffer binário pelos marcadores `0xFF 0xD8` (início) e `0xFF 0xD9` (fim)
-- Thread separada (daemon) com reconexão automática (retry 2 s)
-- URL do stream: `http://<IP>:81/stream`
+**Technical details:**
+- Stream read via `requests` with `stream=True`
+- JPEG frames extracted from the binary buffer using `0xFF 0xD8` (start) and `0xFF 0xD9` (end) markers
+- Separate daemon thread with automatic reconnection (2 s retry)
+- Stream URL: `http://<IP>:81/stream`
 
-**Classe: `WebcamHandler`** — webcam local (PC)
+**Class: `WebcamHandler`** — local webcam (PC)
 
-| Método | Descrição |
-|---|---|
-| `__init__()` | Abre `cv2.VideoCapture(0)` e arranca thread de captura |
-| `get_frame()` | Devolve o último frame capturado |
-| `stop()` | Liberta o VideoCapture |
+| Method | Description |
+|--------|-------------|
+| `__init__()` | Opens `cv2.VideoCapture(0)` and starts capture thread |
+| `get_frame()` | Returns the latest captured frame |
+| `stop()` | Releases the VideoCapture |
 
-**Classe: `IMUHandler`** — dados IMU do drone via HTTP
+**Class: `IMUHandler`** — drone IMU data via HTTP
 
-| Método | Descrição |
-|---|---|
-| `__init__(base_url)` | Arranca thread de polling ao endpoint `/imu` a 10 Hz |
-| `get_imu()` | Devolve o último sample JSON ou `None` |
-| `stop()` | Para a thread |
+| Method | Description |
+|--------|-------------|
+| `__init__(base_url)` | Starts a polling thread to the `/imu` endpoint at 10 Hz |
+| `get_imu()` | Returns the latest JSON sample or `None` |
+| `stop()` | Stops the thread |
 
-Campos do JSON: `ax, ay, az` (g), `gx, gy, gz` (°/s), `bat` (mV), `fc_state`.
+JSON fields: `ax, ay, az` (g), `gx, gy, gz` (°/s), `bat` (mV), `fc_state`.
 
 ---
 
 ### `Processor.py`
 
-Processa os frames com MediaPipe FaceMesh, extrai o sinal RGB da testa, corre os algoritmos rPPG e filtra os sinais BVP.
+Processes frames with MediaPipe FaceMesh, extracts the forehead RGB signal, runs rPPG algorithms and filters the BVP signals.
 
-**Classe: `FaceProcessor`**
+**Class: `FaceProcessor`**
 
-| Método | Descrição |
-|---|---|
-| `__init__(camera, algorithm, imu)` | Inicializa FaceMesh, `rgb_signal`, timestamps e gráfico RGB em tempo real |
-| `process_frame(frame)` | Redimensiona frame, corre FaceMesh, extrai RGB da ROI, desenha landmarks |
-| `get_forehead_polygon(landmarks, w, h)` | Converte 4 landmarks da testa em coordenadas de pixel |
-| `get_fps(window=60)` | Estima fps a partir dos timestamps reais dos últimos `window` frames; fallback 27.0 Hz |
-| `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] sobre o sinal BVP |
-| `_update_plot()` | Atualiza o gráfico RGB ao vivo (janela deslizante 300 frames) |
-| `run()` | Loop principal: captura frames, processa, mostra vídeo e atualiza gráfico a cada 5 frames |
-| `stop()` | Fecha FaceMesh, para câmara, corre o algoritmo selecionado e mostra plot BVP + BPM |
+| Method | Description |
+|--------|-------------|
+| `__init__(camera, algorithm, imu)` | Initializes FaceMesh, `rgb_signal`, timestamps and live RGB plot |
+| `process_frame(frame)` | Resizes frame, runs FaceMesh, extracts ROI RGB, draws landmarks |
+| `get_forehead_polygon(landmarks, w, h)` | Converts 4 forehead landmarks to pixel coordinates |
+| `get_fps(window=60)` | Estimates FPS from real timestamps of the last `window` frames; fallback 27.0 Hz |
+| `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] on the BVP signal |
+| `_update_plot()` | Updates the live RGB plot (sliding window of 300 frames) |
+| `run()` | Main loop: capture frames, process, display video and update plot every 5 frames |
+| `stop()` | Closes FaceMesh, stops camera, runs selected algorithm and shows BVP plot + BPM |
 
-**Configuração do FaceMesh:**
-- `max_num_faces=1` — deteta apenas uma face
-- `refine_landmarks=False` — sem refinamento de íris
+**FaceMesh configuration:**
+- `max_num_faces=1` — detects only one face
+- `refine_landmarks=False` — no iris refinement
 - `min_detection_confidence=0.5`
 - `min_tracking_confidence=0.5`
 
-**Otimizações de performance:**
-- Frame redimensionado para **320×240** antes do MediaPipe
-- `rgb.flags.writeable = False` antes do `process()` (otimização MediaPipe)
-- Apenas pontos desenhados, sem ligações (`connections=None`)
+**Performance optimizations:**
+- Frame resized to **320×240** before MediaPipe
+- `rgb.flags.writeable = False` before `process()` (MediaPipe optimization)
+- Only landmark points drawn, no connections (`connections=None`)
 
-**ROI da testa:**
+**Forehead ROI:**
 
-Quadrilátero central definido por 4 landmarks: `[103, 332, 296, 66]`
+Central quadrilateral defined by 4 landmarks: `[103, 332, 296, 66]`
 
-| Índice | Posição |
-|---|---|
-| 103 | Topo esquerda |
-| 332 | Topo direita |
-| 296 | Fundo direita (acima sobrancelha) |
-| 66 | Fundo esquerda (acima sobrancelha) |
+| Index | Position |
+|-------|----------|
+| 103 | Top left |
+| 332 | Top right |
+| 296 | Bottom right (above eyebrow) |
+| 66 | Bottom left (above eyebrow) |
 
-Contorno amarelo com preenchimento semitransparente (20% opacidade).
+Yellow outline with semi-transparent fill (20% opacity).
 
-**Sinal RGB (`rgb_signal`):**
-- Por frame com face detetada: todos os píxeis dentro do polígono ROI → média espacial → `[R, G, B]`
-- Acumulado em `self.rgb_signal`; convertido para `np.ndarray (N, 3)` no `stop()`
+**RGB signal (`rgb_signal`):**
+- Per frame with detected face: all pixels inside the ROI polygon → spatial mean → `[R, G, B]`
+- Accumulated in `self.rgb_signal`; converted to `np.ndarray (N, 3)` on `stop()`
 
-**Estimação de fps (`get_fps`):**
-- Calculado a partir dos timestamps reais dos frames (`time.time()`)
-- Evita depender do fps nominal da câmara, que pode variar no stream MJPEG
+**FPS estimation (`get_fps`):**
+- Calculated from real frame timestamps (`time.time()`)
+- Avoids relying on the nominal camera FPS, which can vary in MJPEG streams
 - Fallback: `27.0 Hz`
 
-**Filtros (`apply_filters`):**
+**Filters (`apply_filters`):**
 
-Aplicados no `Processor` após cada algoritmo, não dentro dos algoritmos. Conforme Face2PPG (Casado & López, 2023) e Wang et al. (2017), que descreve o POS core sem filtragem.
+Applied in the `Processor` after each algorithm, not inside the algorithms. Following Face2PPG (Casado & López, 2023) and Wang et al. (2017), which describes the POS core without filtering.
 
-1. **Detrend** (λ=100) — remove deriva lenta da baseline
-2. **Butterworth bandpass** [0.75–4.0 Hz], ordem 2, `filtfilt` — banda cardíaca (45–240 bpm)
+1. **Detrend** (λ=100) — removes slow baseline drift
+2. **Butterworth bandpass** [0.75–4.0 Hz], order 2, `filtfilt` — cardiac band (45–240 bpm)
 
-**Output no `stop()`:**
+**Output on `stop()`:**
 
-Figura matplotlib com o BVP filtrado do algoritmo selecionado e o BPM estimado no título. O `fs` real (medido em runtime) é indicado.
+Matplotlib figure with the filtered BVP from the selected algorithm and the estimated BPM in the title. The real `fs` (measured at runtime) is indicated.
 
 ---
 
 ### `algoritmos/`
 
-Cada algoritmo recebe `rgb (N, 3)` (e opcionalmente `fs` ou `imu`) e devolve `bvp (N,)` — sinal BVP bruto, sem filtros.
+Each algorithm receives `rgb (N, 3)` (and optionally `fs` or `imu`) and returns `bvp (N,)` — raw BVP signal, without filters.
 
 #### `green.py` — GREEN
 
 > Verkruysse, W., Svaasand, L. O. & Nelson, J. S. *Remote plethysmographic imaging using ambient light.* Optical Express 16, 21434–21445 (2008).
 
-Extrai o canal verde diretamente. A hemoglobina absorve fortemente na banda verde, tornando-o o canal com maior amplitude pulsátil.
+Extracts the green channel directly. Hemoglobin absorbs strongly in the green band (~550 nm), making it the channel with the highest pulse amplitude.
 
 ```
 BVP = G
@@ -172,20 +172,20 @@ BVP = G
 
 > Álvarez Casado, C., & Bordallo López, M. *Face2PPG: An unsupervised pipeline for blood volume pulse extraction from faces.* IEEE JBHI (2023).
 
-Utiliza decomposição QR para remover a componente dominante do sinal RGB (ruído/iluminação) e extrair o pulso no subespaço ortogonal.
+Uses QR decomposition to remove the dominant component of the RGB signal (noise/illumination) and extract the pulse in the orthogonal subspace.
 
 ```
 A = rgb.T                    # (3, N)
 Q, R = qr(A)
-S = Q[:, 0]                  # direcção dominante
-P = I - Sᵀ·S                 # projector ortogonal
-Y = P @ A                    # componente dominante removida
-BVP = Y[1, :]                # segunda linha
+S = Q[:, 0]                  # dominant direction
+P = I - Sᵀ·S                 # orthogonal projector
+Y = P @ A                    # dominant component removed
+BVP = Y[1, :]                # second row
 ```
 
 **Input:** `rgb (N, 3)`
 **Output:** `bvp (N,)`
-**Nota:** Robusto a artefactos de compressão de vídeo (H.264).
+**Note:** Robust to video compression artifacts (H.264).
 
 ---
 
@@ -193,43 +193,43 @@ BVP = Y[1, :]                # segunda linha
 
 > Wang, W., den Brinker, A. C., Stuijk, S., & de Haan, G. *Algorithmic principles of remote PPG.* IEEE TBME, 64(7), 1479–1491 (2017).
 
-Janela deslizante de 1.6 s. Em cada janela, normaliza temporalmente o RGB e projecta num plano ortogonal ao tom de pele para separar o pulso das variações de intensidade.
+1.6 s sliding window. In each window, temporally normalizes the RGB and projects onto a plane orthogonal to the skin tone to separate the pulse from intensity variations.
 
 ```
-l = ceil(1.6 × fs)           # frames por janela
-Cn = RGB[m:n] / mean(RGB[m:n])   # normalização temporal
-S = [[0,1,-1],[-2,1,1]] @ Cn     # projecção POS
+l = ceil(1.6 × fs)               # frames per window
+Cn = RGB[m:n] / mean(RGB[m:n])   # temporal normalization
+S = [[0,1,-1],[-2,1,1]] @ Cn     # POS projection
 h = S[0] + σ(S[0])/σ(S[1]) × S[1]  # alpha tuning
-H[m:n] += h - mean(h)        # overlap-add
+H[m:n] += h - mean(h)            # overlap-add
 ```
 
 **Input:** `rgb (N, 3)`, `fs (float)`
 **Output:** `bvp (N,)`
-**Nota:** `fs` necessário para calcular o comprimento da janela.
+**Note:** `fs` required to compute the window length.
 
 ---
 
-#### `adaptive_lms.py` — LMS adaptativo com IMU
+#### `adaptive_lms.py` — Adaptive LMS with IMU
 
 > Widrow, B. & Hoff, M. E. *Adaptive switching circuits.* IRE WESCON (1960).
 
-Cancela artefactos de movimento usando o sinal IMU como referência de ruído. Filtragem NLMS (Normalized LMS): o filtro adapta os seus pesos para estimar a componente de movimento no sinal verde e subtrai-a.
+Cancels motion artifacts using the IMU signal as a noise reference. NLMS (Normalized LMS) filtering: the filter adapts its weights to estimate the motion component in the green signal and subtracts it.
 
 ```
-green = rgb[:, 1]            # canal verde
-imu_ref = interp(IMU, N)     # interpolado para N frames
-error[n] = green[n] - w·x[n]        # sinal limpo
-w += (μ / (||x||² + ε)) × error × x # actualização NLMS
+green = rgb[:, 1]                        # green channel
+imu_ref = interp(IMU, N)                 # interpolated to N frames
+error[n] = green[n] - w·x[n]            # clean signal
+w += (μ / (||x||² + ε)) × error × x    # NLMS weight update
 ```
 
-**Input:** `rgb (N, 3)`, `imu_data (dict com ax/ay/az/gx/gy/gz)`
+**Input:** `rgb (N, 3)`, `imu_data (dict with ax/ay/az/gx/gy/gz)`
 **Output:** `bvp (N,)`
-**Parâmetros:** `μ=0.01` (step size), `ε=1e-6` (regularização)
-**Nota:** Exclusivo do modo drone — requer IMU. Não disponível com webcam.
+**Parameters:** `μ=0.01` (step size), `ε=1e-6` (regularization)
+**Note:** Drone mode only — requires IMU. Not available with webcam.
 
 ---
 
-## Dependências
+## Dependencies
 
 ```
 opencv-python
@@ -240,41 +240,41 @@ scipy
 matplotlib
 ```
 
-Instalar:
+Install:
 ```bash
 pip install opencv-python mediapipe requests numpy scipy matplotlib
 ```
 
-> Requer **Python 3.11** (MediaPipe tem compatibilidade limitada com versões mais recentes)
+> Requires **Python 3.11** (MediaPipe has limited compatibility with newer versions)
 
 ---
 
-## Como correr
+## How to Run
 
 ```bash
 python main.py
 ```
 
-O programa pergunta:
-1. Fonte de vídeo: `A` (drone, `192.168.4.1`) ou `B` (webcam PC)
-2. Algoritmo rPPG: `GREEN`, `OMIT`, `POS_WANG` ou `LMS` (LMS só disponível com drone)
+The program prompts:
+1. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
+2. rPPG algorithm: `GREEN`, `OMIT`, `POS_WANG` or `LMS` (LMS only available with drone)
 
-Premir `q` para terminar — fecha o vídeo, corre o algoritmo selecionado sobre o sinal recolhido e mostra o plot BVP filtrado com o BPM estimado.
+Press `q` to stop — closes the video, runs the selected algorithm on the collected signal and displays the filtered BVP plot with the estimated BPM.
 
 ---
 
-## Estado e próximos passos
+## Status and Next Steps
 
-- [x] Stream MJPEG da câmara XIAO ESP32
-- [x] Deteção facial com MediaPipe FaceMesh
-- [x] ROI testa (4 landmarks, máscara de píxeis)
-- [x] Extração de `rgb_signal (N, 3)` frame a frame
-- [x] Gráfico RGB em tempo real (janela deslizante 300 frames)
-- [x] Estimação de fps a partir de timestamps reais
-- [x] Algoritmos GREEN, OMIT, POS_WANG e LMS em `algoritmos/`
-- [x] Filtros no Processor: detrend + Butterworth bandpass [0.75–4.0 Hz]
-- [x] HR em tempo real (a cada 30 frames, janela mínima 30 s)
+- [x] MJPEG stream from XIAO ESP32 camera
+- [x] Face detection with MediaPipe FaceMesh
+- [x] Forehead ROI (4 landmarks, pixel mask)
+- [x] `rgb_signal (N, 3)` extraction frame by frame
+- [x] Live RGB plot (sliding window of 300 frames)
+- [x] FPS estimation from real timestamps
+- [x] GREEN, OMIT, POS_WANG and LMS algorithms in `algoritmos/`
+- [x] Filters in Processor: detrend + Butterworth bandpass [0.75–4.0 Hz]
+- [x] Real-time HR (every 30 frames, minimum 30 s window)
 - [x] `estimate_hr(bvp, fs)` → BPM via FFT (range 45–240 bpm)
-- [x] Algoritmo LMS com IMU para cancelamento de artefactos de movimento
-- [ ] Compensação de movimento via IMU nos algoritmos GREEN / OMIT / POS
-- [ ] Validação clínica da estimativa HR vs. referência
+- [x] LMS algorithm with IMU for motion artifact cancellation
+- [ ] IMU-based motion compensation for GREEN / OMIT / POS algorithms
+- [ ] Clinical validation of HR estimate vs. reference
