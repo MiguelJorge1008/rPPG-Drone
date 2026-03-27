@@ -18,9 +18,11 @@ Drone_rPPG/
 │   └── partitions.csv
 │
 ├── software/                # Python code (PC / Ground Station)
-│   ├── main.py              # Entry point: selects video source and algorithm
+│   ├── main.py              # Entry point: selects source, algorithm and ROI mode
 │   ├── DataHandler.py       # CameraHandler, WebcamHandler, IMUHandler
-│   ├── Processor.py         # FaceProcessor: ROI, RGB, real-time HR
+│   ├── Processor.py         # FaceProcessor: ROI, RGB extraction, real-time HR
+│   ├── ROIExtraction.py     # ROI modes, face polygon, 9×9 grid, DMRS selection
+│   ├── evaluate.py          # Offline evaluation: MAE, RMSE, PCC from CSV
 │   ├── SOFTWARE.md          # Software technical documentation
 │   └── algoritmos/
 │       ├── green.py         # GREEN algorithm (Verkruysse 2008)
@@ -70,23 +72,41 @@ Developed in **Python 3.11** with OpenCV, MediaPipe and NumPy/SciPy.
 
 | Module | Function |
 |--------|----------|
-| `main.py` | Selects video source (drone / webcam) and rPPG algorithm |
+| `main.py` | Selects video source, rPPG algorithm and ROI mode at startup |
 | `DataHandler.py` | `CameraHandler` (MJPEG), `WebcamHandler` (webcam), `IMUHandler` (polling `/imu`) |
-| `Processor.py` | FaceMesh → forehead ROI → RGB/frame → real-time HR |
+| `Processor.py` | FaceMesh → ROI → RGB/frame → real-time HR (background thread) |
+| `ROIExtraction.py` | ROI modes, polygon extraction, 9×9 grid, DMRS region selection |
+| `evaluate.py` | MAE / RMSE / PCC evaluation from a ground-truth CSV |
 | `algoritmos/green.py` | Direct green channel |
 | `algoritmos/omit.py` | QR decomposition, orthogonal subspace |
 | `algoritmos/pos_wang.py` | 1.6 s sliding window, POS projection |
 | `algoritmos/adaptive_lms.py` | Adaptive NLMS with IMU as noise reference (drone only) |
 
+### ROI Modes
+
+| Mode | Description |
+|------|-------------|
+| **Forehead** | 4-landmark forehead quadrilateral (original, fastest) |
+| **Full face** | 36-landmark face oval contour |
+| **Multi-region** | Face oval divided into 9×9 grid; DMRS dynamically selects the best regions (Face2PPG) |
+
 ### Run
 
 ```bash
 cd software
-pip install opencv-python mediapipe requests numpy scipy matplotlib
+pip install opencv-python mediapipe requests numpy scipy matplotlib pandas
 python main.py
 ```
 
-The program prompts for the video source (drone or webcam) and the rPPG algorithm. Press `q` to stop — runs the final analysis and displays the filtered BVP plot with the estimated BPM.
+The program prompts for the video source, rPPG algorithm and ROI mode. Press `q` to stop.
+
+### Evaluate
+
+```bash
+python evaluate.py results.csv --plot --save
+```
+
+Expects a CSV with columns `HR_gt`, `HR_GREEN`, `HR_OMIT`, `HR_POS_WANG`, `HR_LMS`, `roi_mode`, `source`. Outputs MAE / RMSE / PCC tables per algorithm and condition.
 
 ## How It Works
 
@@ -94,9 +114,14 @@ The program prompts for the video source (drone or webcam) and the rPPG algorith
 OV3660 (MJPEG)  ──→  CameraHandler  ──→  FaceProcessor
 MPU-6050        ──→  IMUHandler     ──┘
                                          │
-                                    FaceMesh → forehead ROI
+                                    FaceMesh (468 landmarks)
                                          │
-                                    Mean RGB / frame
+                          ┌──────────────┼──────────────┐
+                       Forehead       Face oval     Multi-region
+                      (4 landmarks) (36 landmarks)  (9×9 DMRS)
+                          └──────────────┼──────────────┘
+                                         │
+                                   Mean RGB / frame
                                          │
                               GREEN / OMIT / POS / LMS
                                          │

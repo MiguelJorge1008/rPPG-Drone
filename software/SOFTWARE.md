@@ -8,15 +8,16 @@ Video acquisition and face detection software for rPPG (remote Photoplethysmogra
 
 ```
 software/
-├── main.py                  # Entry point: selects video source and algorithm
+├── main.py                  # Entry point: selects source, algorithm and ROI mode
 ├── DataHandler.py           # CameraHandler, WebcamHandler, IMUHandler
 ├── Processor.py             # Face detection, ROI, filters, real-time HR
-├── algoritmos/
-│   ├── green.py             # GREEN algorithm (Verkruysse 2008)
-│   ├── omit.py              # OMIT algorithm (Casado & López 2023)
-│   ├── pos_wang.py          # POS algorithm (Wang et al. 2017)
-│   └── adaptive_lms.py      # Adaptive NLMS filter with IMU (drone only)
-└── SOFTWARE.md
+├── ROIExtraction.py         # ROI modes, face polygon, grid extraction, DMRS
+├── evaluate.py              # Offline evaluation: MAE, RMSE, PCC from CSV
+└── algoritmos/
+    ├── green.py             # GREEN algorithm (Verkruysse 2008)
+    ├── omit.py              # OMIT algorithm (Casado & López 2023)
+    ├── pos_wang.py          # POS algorithm (Wang et al. 2017)
+    └── adaptive_lms.py      # Adaptive NLMS filter with IMU (drone only)
 ```
 
 ---
@@ -26,10 +27,13 @@ software/
 ```
 Frame (camera / webcam)
   → MediaPipe FaceMesh (face detection)
-  → Forehead ROI (4 landmarks) → mean RGB per frame
-  → rgb_signal  (N, 3)
-  → [GREEN / OMIT / POS_WANG / LMS]  →  raw BVP  (N,)
-  → apply_filters  →  filtered BVP  (N,)
+  → ROI extraction (FOREHEAD / FACE / MULTI)
+       FOREHEAD : 4 landmarks → forehead polygon → mean RGB/frame
+       FACE     : 36 landmarks → face oval polygon → mean RGB/frame
+       MULTI    : face oval → 9×9 grid → DMRS region selection → mean RGB/frame
+  → rgb_signal (N, 3)
+  → [GREEN / OMIT / POS_WANG / LMS]  →  raw BVP (N,)
+  → apply_filters  →  filtered BVP (N,)
   → estimate_hr  →  BPM  (FFT, range 45–240 bpm)
 ```
 
@@ -39,11 +43,12 @@ Frame (camera / webcam)
 
 ### `main.py`
 
-Entry point. Prompts the user for the video source and rPPG algorithm, instantiates the handlers and starts the main loop.
+Entry point. Prompts the user for the video source, rPPG algorithm and ROI mode, then starts the main loop.
 
 - **Source A — Drone:** `CameraHandler` (MJPEG stream) + `IMUHandler` (polling `/imu`); fixed IP `http://192.168.4.1`
 - **Source B — Webcam:** `WebcamHandler` (local OpenCV VideoCapture)
-- **Available algorithms:** GREEN, OMIT, POS_WANG, LMS (LMS only available in drone mode, requires IMU)
+- **Available algorithms:** GREEN, OMIT, POS_WANG, LMS (LMS only in drone mode)
+- **ROI modes:** FOREHEAD, FACE, MULTI
 
 ---
 
@@ -86,66 +91,119 @@ JSON fields: `ax, ay, az` (g), `gx, gy, gz` (°/s), `bat` (mV), `fc_state`.
 
 ---
 
+### `ROIExtraction.py`
+
+All ROI logic: landmark indices, polygon extraction, grid extraction and DMRS region selection.
+
+**ROI mode constants:**
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ROI_FOREHEAD` | `"FOREHEAD"` | 4-landmark forehead quadrilateral (original) |
+| `ROI_FACE` | `"FACE"` | 36-landmark face oval contour |
+| `ROI_MULTI` | `"MULTI"` | Face oval + 9×9 grid + DMRS selection (Face2PPG) |
+
+**Landmark indices:**
+
+- `FOREHEAD_ROI = [103, 332, 296, 66]` — 4 forehead landmarks
+- `FACE_OVAL` — 36 ordered landmarks tracing the face contour
+
+**Functions:**
+
+| Function | Description |
+|----------|-------------|
+| `get_roi_polygon(landmarks, w, h, ema, alpha, roi_mode)` | Returns face polygon with EMA smoothing; dispatches to FOREHEAD or FACE_OVAL indices |
+| `extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean)` | Divides face bounding box into GRID_N×GRID_N cells; returns mean RGB per cell |
+| `draw_grid_overlay(frame, poly, h, w, selected_indices)` | Draws grid on frame; selected regions shown in green |
+| `compute_kfd(signal)` | Katz Fractal Dimension — measures signal complexity |
+| `compute_dfa(signal)` | Detrended Fluctuation Analysis — measures long-range correlations |
+| `dmrs_select(region_signals, fs, r_max, kfd_thresh)` | Dynamic Multi-Region Selection: variance → KFD → spectral energy ranking |
+
+**DMRS pipeline (Face2PPG, Casado & López 2023):**
+
+1. Discard regions with zero variance
+2. KFD filter: keep regions with `KFD_i / KFD_global >= 0.85`
+3. Rank by spectral energy in HR band [0.75–4.0 Hz] → top `R_MAX=32` regions
+
+> DFA omitted from real-time DMRS for performance. DMRS runs in a background thread every 90 frames; HR estimation uses the cached selected regions every 30 frames.
+
+**Grid parameters:**
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `GRID_N` | 9 | Grid rows/columns (9×9 = 81 regions) |
+| `R_MAX` | 32 | Max regions selected by DMRS |
+| `MIN_REGION_PIXELS` | 5 | Min pixels inside face mask for a cell to be valid |
+
+---
+
 ### `Processor.py`
 
-Processes frames with MediaPipe FaceMesh, extracts the forehead RGB signal, runs rPPG algorithms and filters the BVP signals.
+Processes frames with MediaPipe FaceMesh, extracts the RGB signal, runs rPPG algorithms and estimates HR in real time.
 
 **Class: `FaceProcessor`**
 
 | Method | Description |
 |--------|-------------|
-| `__init__(camera, algorithm, imu)` | Initializes FaceMesh, `rgb_signal`, timestamps and live RGB plot |
-| `process_frame(frame)` | Resizes frame, runs FaceMesh, extracts ROI RGB, draws landmarks |
-| `get_forehead_polygon(landmarks, w, h)` | Converts 4 forehead landmarks to pixel coordinates |
-| `get_fps(window=60)` | Estimates FPS from real timestamps of the last `window` frames; fallback 27.0 Hz |
-| `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] on the BVP signal |
-| `_update_plot()` | Updates the live RGB plot (sliding window of 300 frames) |
-| `run()` | Main loop: capture frames, process, display video and update plot every 5 frames |
-| `stop()` | Closes FaceMesh, stops camera, runs selected algorithm and shows BVP plot + BPM |
+| `__init__(camera, imu, algo, roi)` | Initializes FaceMesh, signal buffers, background threads |
+| `process_frame(frame)` | Resizes to 320×240, runs FaceMesh, extracts ROI RGB, draws overlay |
+| `get_fps(window=60)` | Estimates FPS from real timestamps; fallback 27.0 Hz |
+| `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] |
+| `estimate_hr(bvp, fs)` | FFT peak in [0.75–4.0 Hz] → BPM |
+| `_estimate_hr_realtime()` | Computes BVP + HR on signal window; uses DMRS regions if ROI_MULTI |
+| `_compute_hr_background()` | Background thread: HR every 30 frames |
+| `_compute_dmrs_background()` | Background thread: DMRS region selection every 90 frames (ROI_MULTI only) |
+| `run()` | Main acquisition + display loop |
+| `stop()` | Closes FaceMesh and camera |
 
 **FaceMesh configuration:**
-- `max_num_faces=1` — detects only one face
-- `refine_landmarks=False` — no iris refinement
-- `min_detection_confidence=0.5`
-- `min_tracking_confidence=0.5`
-
-**Performance optimizations:**
-- Frame resized to **320×240** before MediaPipe
-- `rgb.flags.writeable = False` before `process()` (MediaPipe optimization)
-- Only landmark points drawn, no connections (`connections=None`)
-
-**Forehead ROI:**
-
-Central quadrilateral defined by 4 landmarks: `[103, 332, 296, 66]`
-
-| Index | Position |
-|-------|----------|
-| 103 | Top left |
-| 332 | Top right |
-| 296 | Bottom right (above eyebrow) |
-| 66 | Bottom left (above eyebrow) |
-
-Yellow outline with semi-transparent fill (20% opacity).
-
-**RGB signal (`rgb_signal`):**
-- Per frame with detected face: all pixels inside the ROI polygon → spatial mean → `[R, G, B]`
-- Accumulated in `self.rgb_signal`; converted to `np.ndarray (N, 3)` on `stop()`
-
-**FPS estimation (`get_fps`):**
-- Calculated from real frame timestamps (`time.time()`)
-- Avoids relying on the nominal camera FPS, which can vary in MJPEG streams
-- Fallback: `27.0 Hz`
+- `max_num_faces=1`, `refine_landmarks=False`
+- `min_detection_confidence=0.5`, `min_tracking_confidence=0.5`
 
 **Filters (`apply_filters`):**
 
-Applied in the `Processor` after each algorithm, not inside the algorithms. Following Face2PPG (Casado & López, 2023) and Wang et al. (2017), which describes the POS core without filtering.
-
-1. **Detrend** (λ=100) — removes slow baseline drift
+1. **Detrend** (λ=100) — removes slow baseline drift (Tarvainen sparse method)
 2. **Butterworth bandpass** [0.75–4.0 Hz], order 2, `filtfilt` — cardiac band (45–240 bpm)
 
-**Output on `stop()`:**
+**HR estimation (`estimate_hr`):**
 
-Matplotlib figure with the filtered BVP from the selected algorithm and the estimated BPM in the title. The real `fs` (measured at runtime) is indicated.
+FFT over the filtered BVP signal; peak frequency in [0.75–4.0 Hz] converted to BPM.
+
+**Background thread triggers:**
+
+| Trigger | Interval | Task |
+|---------|----------|------|
+| Every 30 frames | ~2 s @ 15 fps | HR estimation (lightweight) |
+| Every 90 frames | ~6 s @ 15 fps | DMRS region selection (ROI_MULTI only) |
+
+---
+
+### `evaluate.py`
+
+Offline evaluation script. Reads a results CSV and computes MAE, RMSE and PCC per algorithm, with optional breakdown by ROI mode and source.
+
+**Expected CSV columns:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | float | Time of measurement |
+| `HR_gt` | float | Ground truth HR in BPM (oximeter) |
+| `HR_GREEN` | float | Estimated HR — GREEN (optional) |
+| `HR_OMIT` | float | Estimated HR — OMIT (optional) |
+| `HR_POS_WANG` | float | Estimated HR — POS_WANG (optional) |
+| `HR_LMS` | float | Estimated HR — LMS (optional) |
+| `roi_mode` | str | FOREHEAD / FACE / MULTI (optional) |
+| `source` | str | drone / webcam (optional) |
+
+**Usage:**
+
+```bash
+python evaluate.py results.csv           # MAE / RMSE / PCC tables
+python evaluate.py results.csv --plot    # + scatter plots per algorithm
+python evaluate.py results.csv --save    # + save metrics to results_metrics.csv
+```
+
+**Output:** tables with MAE (BPM), RMSE (BPM) and PCC broken down by algorithm, ROI mode and source — equivalent to Face2PPG Table I format.
 
 ---
 
@@ -163,29 +221,22 @@ Extracts the green channel directly. Hemoglobin absorbs strongly in the green ba
 BVP = G
 ```
 
-**Input:** `rgb (N, 3)`
-**Output:** `bvp (N,)`
-
 ---
 
 #### `omit.py` — OMIT (Orthogonal Matrix Image Transformation)
 
 > Álvarez Casado, C., & Bordallo López, M. *Face2PPG: An unsupervised pipeline for blood volume pulse extraction from faces.* IEEE JBHI (2023).
 
-Uses QR decomposition to remove the dominant component of the RGB signal (noise/illumination) and extract the pulse in the orthogonal subspace.
+Uses QR decomposition to remove the dominant component of the RGB signal and extract the pulse in the orthogonal subspace. Robust to video compression artifacts.
 
 ```
 A = rgb.T                    # (3, N)
 Q, R = qr(A)
 S = Q[:, 0]                  # dominant direction
 P = I - Sᵀ·S                 # orthogonal projector
-Y = P @ A                    # dominant component removed
-BVP = Y[1, :]                # second row
+Y = P @ A
+BVP = Y[1, :]
 ```
-
-**Input:** `rgb (N, 3)`
-**Output:** `bvp (N,)`
-**Note:** Robust to video compression artifacts (H.264).
 
 ---
 
@@ -193,19 +244,15 @@ BVP = Y[1, :]                # second row
 
 > Wang, W., den Brinker, A. C., Stuijk, S., & de Haan, G. *Algorithmic principles of remote PPG.* IEEE TBME, 64(7), 1479–1491 (2017).
 
-1.6 s sliding window. In each window, temporally normalizes the RGB and projects onto a plane orthogonal to the skin tone to separate the pulse from intensity variations.
+1.6 s sliding window. Temporally normalizes RGB and projects onto a plane orthogonal to the skin tone to separate pulse from intensity variations.
 
 ```
-l = ceil(1.6 × fs)               # frames per window
-Cn = RGB[m:n] / mean(RGB[m:n])   # temporal normalization
-S = [[0,1,-1],[-2,1,1]] @ Cn     # POS projection
-h = S[0] + σ(S[0])/σ(S[1]) × S[1]  # alpha tuning
-H[m:n] += h - mean(h)            # overlap-add
+l = ceil(1.6 × fs)
+Cn = RGB[m:n] / mean(RGB[m:n])
+S = [[0,1,-1],[-2,1,1]] @ Cn
+h = S[0] + σ(S[0])/σ(S[1]) × S[1]
+H[m:n] += h - mean(h)           # overlap-add
 ```
-
-**Input:** `rgb (N, 3)`, `fs (float)`
-**Output:** `bvp (N,)`
-**Note:** `fs` required to compute the window length.
 
 ---
 
@@ -213,19 +260,16 @@ H[m:n] += h - mean(h)            # overlap-add
 
 > Widrow, B. & Hoff, M. E. *Adaptive switching circuits.* IRE WESCON (1960).
 
-Cancels motion artifacts using the IMU signal as a noise reference. NLMS (Normalized LMS) filtering: the filter adapts its weights to estimate the motion component in the green signal and subtracts it.
+Cancels motion artifacts using the IMU signal as noise reference. NLMS filtering adapts its weights to estimate and subtract the motion component from the green signal.
 
 ```
-green = rgb[:, 1]                        # green channel
-imu_ref = interp(IMU, N)                 # interpolated to N frames
-error[n] = green[n] - w·x[n]            # clean signal
-w += (μ / (||x||² + ε)) × error × x    # NLMS weight update
+green = rgb[:, 1]
+imu_ref = interp(IMU, N)
+error[n] = green[n] - w·x[n]
+w += (μ / (||x||² + ε)) × error × x   # NLMS weight update
 ```
 
-**Input:** `rgb (N, 3)`, `imu_data (dict with ax/ay/az/gx/gy/gz)`
-**Output:** `bvp (N,)`
-**Parameters:** `μ=0.01` (step size), `ε=1e-6` (regularization)
-**Note:** Drone mode only — requires IMU. Not available with webcam.
+**Parameters:** `μ=0.01`, `ε=1e-6`. Drone mode only.
 
 ---
 
@@ -238,11 +282,12 @@ requests
 numpy
 scipy
 matplotlib
+pandas
 ```
 
 Install:
 ```bash
-pip install opencv-python mediapipe requests numpy scipy matplotlib
+pip install opencv-python mediapipe requests numpy scipy matplotlib pandas
 ```
 
 > Requires **Python 3.11** (MediaPipe has limited compatibility with newer versions)
@@ -257,24 +302,31 @@ python main.py
 
 The program prompts:
 1. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
-2. rPPG algorithm: `GREEN`, `OMIT`, `POS_WANG` or `LMS` (LMS only available with drone)
+2. rPPG algorithm: `1` GREEN · `2` OMIT · `3` POS_WANG · `4` LMS
+3. ROI mode: `1` Forehead · `2` Full face · `3` Multi-region (DMRS)
 
-Press `q` to stop — closes the video, runs the selected algorithm on the collected signal and displays the filtered BVP plot with the estimated BPM.
+Press `q` to stop.
+
+### Evaluate results
+
+```bash
+python evaluate.py results.csv --plot --save
+```
 
 ---
 
 ## Status and Next Steps
 
 - [x] MJPEG stream from XIAO ESP32 camera
-- [x] Face detection with MediaPipe FaceMesh
-- [x] Forehead ROI (4 landmarks, pixel mask)
-- [x] `rgb_signal (N, 3)` extraction frame by frame
-- [x] Live RGB plot (sliding window of 300 frames)
-- [x] FPS estimation from real timestamps
-- [x] GREEN, OMIT, POS_WANG and LMS algorithms in `algoritmos/`
-- [x] Filters in Processor: detrend + Butterworth bandpass [0.75–4.0 Hz]
-- [x] Real-time HR (every 30 frames, minimum 30 s window)
-- [x] `estimate_hr(bvp, fs)` → BPM via FFT (range 45–240 bpm)
-- [x] LMS algorithm with IMU for motion artifact cancellation
-- [ ] IMU-based motion compensation for GREEN / OMIT / POS algorithms
-- [ ] Clinical validation of HR estimate vs. reference
+- [x] Face detection with MediaPipe FaceMesh (468 landmarks)
+- [x] ROI modes: Forehead (4 landmarks) / Face oval (36 landmarks) / Multi-region DMRS
+- [x] 9×9 grid extraction with DMRS region selection (Face2PPG)
+- [x] Grid overlay visualisation in camera window
+- [x] GREEN, OMIT, POS_WANG and LMS algorithms
+- [x] Filters: detrend + Butterworth bandpass [0.75–4.0 Hz]
+- [x] Real-time HR via FFT (every 30 frames)
+- [x] LMS motion artifact cancellation with IMU
+- [x] Evaluation script: MAE / RMSE / PCC from CSV
+- [ ] Peak detection → RR intervals → HRV (SDNN, RMSSD, LF, HF, LF/HF)
+- [ ] IMU-based motion compensation for GREEN / OMIT / POS
+- [ ] Clinical validation against oximeter ground truth
