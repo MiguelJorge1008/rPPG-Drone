@@ -10,17 +10,21 @@ from algoritmos.green import GREEN
 from algoritmos.omit import OMIT
 from algoritmos.pos_wang import POS_WANG
 from algoritmos.adaptive_lms import ADAPTIVE_LMS
+from ROIExtraction import (ROI_FOREHEAD, ROI_FACE, ROI_MULTI,
+                            GRID_N, R_MAX, MIN_REGION_PIXELS,
+                            get_roi_polygon, extract_grid_rgb,
+                            dmrs_select, draw_grid_overlay)
 
 mp_face_mesh = mp.solutions.face_mesh
 mp_drawing   = mp.solutions.drawing_utils
 
-FOREHEAD_ROI   = [103, 332, 296, 66]
 LANDMARK_ALPHA = 0.35
 HR_ALPHA       = 0.1
 
 
 class FaceProcessor:
-    def __init__(self, camera: CameraHandler, imu=None, algo: str = "GREEN"):
+    def __init__(self, camera: CameraHandler, imu=None, algo: str = "GREEN",
+                 roi: str = ROI_FACE):
         """
         Initialises the FaceProcessor.
 
@@ -36,6 +40,7 @@ class FaceProcessor:
         self.camera = camera
         self.imu    = imu
         self.algo   = algo
+        self.roi    = roi
 
         self.face_mesh = mp_face_mesh.FaceMesh(
             max_num_faces=1,
@@ -44,7 +49,8 @@ class FaceProcessor:
             min_tracking_confidence=0.5
         )
 
-        self.rgb_signal          = []   # list of [R_mean, G_mean, B_mean] per frame
+        self.rgb_signal          = []   # list of [R_mean, G_mean, B_mean] per frame (full face)
+        self.region_rgb          = []   # list of (K, 3) arrays per frame — grid regions
         self.frame_timestamps    = []
         self.hr_estimate         = None
         self.landmark_ema        = None
@@ -56,32 +62,10 @@ class FaceProcessor:
         self._hr_lock         = threading.Lock()
         self._latest_bvps     = None
         self._bvps_fresh      = False   # True only when new BVP result not yet plotted
+        self._selected_regions = []     # DMRS-selected region indices (for visualisation)
 
     # ── Face and ROI ──────────────────────────────────────────────────────────
 
-    def get_forehead_polygon(self, landmarks, w, h):
-        """
-        Converts forehead landmarks to pixel coordinates with EMA smoothing.
-
-        Parameters
-        ----------
-        landmarks : mediapipe NormalizedLandmarkList
-        w, h : int  Frame dimensions in pixels.
-
-        Returns
-        -------
-        np.ndarray, shape (4, 2), dtype int32
-        """
-        points = np.array(
-            [[landmarks.landmark[i].x * w, landmarks.landmark[i].y * h]
-             for i in FOREHEAD_ROI], dtype=np.float32
-        )
-        if self.landmark_ema is None:
-            self.landmark_ema = points
-        else:
-            self.landmark_ema = (LANDMARK_ALPHA * points
-                                 + (1 - LANDMARK_ALPHA) * self.landmark_ema)
-        return self.landmark_ema.astype(np.int32)
 
     def process_frame(self, frame):
         """
@@ -117,19 +101,32 @@ class FaceProcessor:
                         color=(0, 255, 0), thickness=-1, circle_radius=1
                     )
                 )
-                poly = self.get_forehead_polygon(face_landmarks, w, h)
+                poly, self.landmark_ema = get_roi_polygon(
+                    face_landmarks, w, h, self.landmark_ema, LANDMARK_ALPHA,
+                    roi_mode=self.roi
+                )
 
-                mask = np.zeros((h, w), dtype=np.uint8)
-                cv2.fillPoly(mask, [poly], 255)
-                roi_pixels = rgb[mask == 255]
+                face_mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(face_mask, [poly], 255)
+                roi_pixels = rgb[face_mask == 255]
                 if len(roi_pixels) > 0:
-                    self.rgb_signal.append(roi_pixels.mean(axis=0))
+                    face_mean = roi_pixels.mean(axis=0)
+                    self.rgb_signal.append(face_mean)
                     self.frame_timestamps.append(time.time())
+                    if self.roi == ROI_MULTI:
+                        self.region_rgb.append(
+                            extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean)
+                        )
 
                 cv2.polylines(small, [poly], isClosed=True, color=(0, 255, 255), thickness=1)
-                overlay = small.copy()
-                cv2.fillPoly(overlay, [poly], color=(0, 255, 255))
-                cv2.addWeighted(overlay, 0.2, small, 0.8, 0, small)
+                if self.roi == ROI_MULTI:
+                    with self._hr_lock:
+                        sel = list(self._selected_regions)
+                    draw_grid_overlay(small, poly, h, w, sel)
+                else:
+                    overlay = small.copy()
+                    cv2.fillPoly(overlay, [poly], color=(0, 255, 255))
+                    cv2.addWeighted(overlay, 0.2, small, 0.8, 0, small)
 
             frame = cv2.resize(small, (frame.shape[1], frame.shape[0]))
         return frame
@@ -163,7 +160,20 @@ class FaceProcessor:
         window = max(int(min_sec * fs), 64)
         if len(self.rgb_signal) < window:
             return None
-        rgb_win = np.array(self.rgb_signal[-window:])
+
+        # Multi-region: use last DMRS-selected regions (updated separately)
+        if self.roi == ROI_MULTI:
+            with self._hr_lock:
+                sel = list(self._selected_regions)
+            if sel and len(self.region_rgb) >= window:
+                region_win = np.array(self.region_rgb[-window:])
+                rgb_win    = region_win[:, sel, :].mean(axis=1)
+            else:
+                rgb_win = np.array(self.rgb_signal[-window:])
+            selected = sel
+        else:
+            rgb_win  = np.array(self.rgb_signal[-window:])
+            selected = []
 
         if self.algo == 'GREEN':
             raw = GREEN(rgb_win)
@@ -183,7 +193,7 @@ class FaceProcessor:
         bvp  = self.apply_filters(raw, fs)
         bvps = {self.algo: bvp}
         hrs  = {self.algo: self.estimate_hr(bvp, fs)}
-        return hrs, bvps
+        return hrs, bvps, selected
 
     @staticmethod
     def estimate_hr(bvp, fs):
@@ -230,12 +240,27 @@ class FaceProcessor:
         b, a  = sp_signal.butter(2, [lo, hi], btype='bandpass')
         return sp_signal.filtfilt(b, a, bvp.astype(np.double))
 
+    def _compute_dmrs_background(self):
+        """Runs DMRS region selection in a background thread (every 90 frames)."""
+        fs     = self.get_fps()
+        window = max(int(30 * fs), 64)
+        if len(self.region_rgb) < window:
+            with self._hr_lock:
+                self._hr_computing = False
+            return
+        region_win = np.array(self.region_rgb[-window:])
+        green_win  = region_win[:, :, 1]
+        selected   = dmrs_select(green_win, fs, r_max=R_MAX)
+        with self._hr_lock:
+            self._selected_regions = selected
+            self._hr_computing = False
+
     def _compute_hr_background(self):
         """Runs HR estimation in a background thread and stores the result."""
         result = self._estimate_hr_realtime()
         with self._hr_lock:
             if result is not None:
-                raw, bvps = result
+                raw, bvps, selected = result
                 if self.hr_ema is None:
                     self.hr_ema = raw
                 else:
@@ -311,15 +336,22 @@ class FaceProcessor:
                         self.imu_signal.append(sample)
                         self._last_imu_id = id(sample)
 
-                self.process_frame(frame)
+                annotated = self.process_frame(frame)
 
-                # HR + BVP estimation every 30 frames — runs in background thread
-                if len(self.rgb_signal) % 30 == 0 and len(self.rgb_signal) > 0:
-                    with self._hr_lock:
-                        if not self._hr_computing:
+                n_frames = len(self.rgb_signal)
+                if n_frames > 0 and not self._hr_computing:
+                    if self.roi == ROI_MULTI and n_frames % 90 == 0:
+                        # DMRS every 90 frames — updates selected regions
+                        with self._hr_lock:
                             self._hr_computing = True
-                            t = threading.Thread(target=self._compute_hr_background, daemon=True)
-                            t.start()
+                        threading.Thread(target=self._compute_dmrs_background,
+                                         daemon=True).start()
+                    elif n_frames % 30 == 0:
+                        # HR every 30 frames
+                        with self._hr_lock:
+                            self._hr_computing = True
+                        threading.Thread(target=self._compute_hr_background,
+                                         daemon=True).start()
 
                 # Update BVP plots only when background thread produced new results
                 with self._hr_lock:
@@ -350,7 +382,7 @@ class FaceProcessor:
                     pct    = min(100, int(n / needed * 100))
                     print(f"\rFace: {face_str} | {roi_str} | A recolher... {pct}%   ", end="", flush=True)
 
-                # cv2.imshow('rPPG', annotated)  # desativado temporariamente
+                cv2.imshow('rPPG', annotated)
 
                 # Update RGB + IMU every 5 frames
                 if len(self.rgb_signal) % 5 == 0 and len(self.rgb_signal) > 0:
