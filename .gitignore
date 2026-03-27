@@ -1,0 +1,27 @@
+# ── Python ────────────────────────────────────────────────────
+software/.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ── ESP-IDF build artifacts ───────────────────────────────────
+firmware/build/
+firmware/managed_components/
+firmware/dependencies.lock
+firmware/sdkconfig.old
+firmware/.cache/
+
+# ── ESP-Drone reference (third-party source, not our code) ────
+firmware/esp-drone-master/
+
+# ── Reference PDFs (copyright) ────────────────────────────────
+REF/
+
+# ── Claude Code ───────────────────────────────────────────────
+.claude/
+
+# ── OS / Editor ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+**/.vscode/settings.json
+*.swp
