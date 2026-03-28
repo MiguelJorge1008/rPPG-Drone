@@ -8,16 +8,17 @@ Video acquisition and face detection software for rPPG (remote Photoplethysmogra
 
 ```
 software/
-├── main.py                  # Entry point: selects source, algorithm and ROI mode
-├── DataHandler.py           # CameraHandler, WebcamHandler, IMUHandler
-├── Processor.py             # Face detection, ROI, filters, real-time HR
-├── ROIExtraction.py         # ROI modes, face polygon, grid extraction, DMRS
-├── evaluate.py              # Offline evaluation: MAE, RMSE, PCC from CSV
+├── main.py                      # Entry point: selects mode, source, algorithm and ROI
+├── DataHandler.py               # CameraHandler, WebcamHandler, IMUHandler
+├── Processor.py                 # FaceProcessor: ROI, RGB extraction, real-time HR (rPPG)
+├── RespiratoryProcessor.py      # RespiratoryProcessor: pose tracking, real-time RR
+├── ROIExtraction.py             # ROI modes, face polygon, grid extraction, DMRS
+├── evaluate.py                  # Offline evaluation: MAE, RMSE, PCC from CSV
 └── algoritmos/
-    ├── green.py             # GREEN algorithm (Verkruysse 2008)
-    ├── omit.py              # OMIT algorithm (Casado & López 2023)
-    ├── pos_wang.py          # POS algorithm (Wang et al. 2017)
-    └── adaptive_lms.py      # Adaptive NLMS filter with IMU (drone only)
+    ├── green.py                 # GREEN algorithm (Verkruysse 2008)
+    ├── omit.py                  # OMIT algorithm (Casado & López 2023)
+    ├── pos_wang.py              # POS algorithm (Wang et al. 2017)
+    └── adaptive_lms.py          # Adaptive NLMS filter with IMU (drone only)
 ```
 
 ---
@@ -43,12 +44,19 @@ Frame (camera / webcam)
 
 ### `main.py`
 
-Entry point. Prompts the user for the video source, rPPG algorithm and ROI mode, then starts the main loop.
+Entry point. Prompts the user for the operating mode, video source, rPPG algorithm and ROI mode, then starts the main loop.
 
-- **Source A — Drone:** `CameraHandler` (MJPEG stream) + `IMUHandler` (polling `/imu`); fixed IP `http://192.168.4.1`
+**Mode selection:**
+
+| Option | Mode | Processor | Description |
+|--------|------|-----------|-------------|
+| `1` | rPPG | `FaceProcessor` | Heart rate from facial colour changes |
+| `2` | Respiratory | `RespiratoryProcessor` | Breathing rate from thorax movement |
+
+- **Source A — Drone:** `CameraHandler` (MJPEG stream) + `IMUHandler` (polling `/imu`, rPPG mode only); fixed IP `http://192.168.4.1`
 - **Source B — Webcam:** `WebcamHandler` (local OpenCV VideoCapture)
-- **Available algorithms:** GREEN, OMIT, POS_WANG, LMS (LMS only in drone mode)
-- **ROI modes:** FOREHEAD, FACE, MULTI
+- **Available algorithms (rPPG only):** GREEN, OMIT, POS_WANG, LMS (LMS only in drone mode)
+- **ROI modes (rPPG only):** FOREHEAD, FACE, MULTI
 
 ---
 
@@ -178,6 +186,81 @@ FFT over the filtered BVP signal; peak frequency in [0.75–4.0 Hz] converted to
 
 ---
 
+### `RespiratoryProcessor.py`
+
+Estimates respiratory rate (RR) in real time using the **Bartula (2013)** camera-based algorithm. Uses MediaPipe Pose **once at startup** to locate the chest and derive a tight ROI; Pose is then closed and the Bartula algorithm runs on that fixed ROI for the rest of the session.
+
+> Bartula, M., Tigges, T., & Muehlsteff, J. *Camera-based System for Contactless Monitoring of Respiration.* IEEE EMBS, 2013.
+
+**Class: `RespiratoryProcessor`**
+
+| Method | Description |
+|--------|-------------|
+| `__init__(camera)` | Initialises signal buffers, position integrator and background thread state |
+| `_init_roi_from_pose(timeout)` | Runs Pose on live frames until shoulders detected; computes chest ROI; closes Pose. Raises `RuntimeError` on timeout. |
+| `process_frame(frame)` | Extracts profile, computes shift, integrates position, detects global motion |
+| `get_fps(window=60)` | Estimates FPS from recent timestamps; fallback 25.0 Hz |
+| `_make_profile(roi_gray)` | 1D vertical profile: mean+std per row, high-pass filtered |
+| `_profile_shift(p_curr, p_prev)` | Phase cross-correlation with Hann window; sub-pixel quadratic interpolation |
+| `_global_motion(curr, prev)` | Block-based frame-difference motion detector |
+| `apply_filters(sig, fs)` | Linear detrend + Butterworth bandpass [0.1–0.5 Hz] |
+| `_estimate_rr_from_peaks(filtered, fs, flags)` | Peak detection + breath-by-breath validation |
+| `_compute_rr_background()` | Background thread: RR every 30 frames |
+| `run()` | Calls `_init_roi_from_pose`, then main acquisition + display loop |
+| `stop()` | Stops camera and closes windows |
+
+**Startup — ROI detection:**
+
+```
+Live frames → MediaPipe Pose
+  shoulders visible (visibility > 0.5)?
+    YES → compute chest ROI from shoulder landmarks → show 1 s → close Pose → start Bartula
+    NO  → keep waiting … timeout (15 s) → RuntimeError
+```
+
+ROI boundaries derived from shoulder landmarks:
+
+| Edge | Formula |
+|------|---------|
+| Top | `shoulder_y − 10 % × shoulder_width` |
+| Bottom | `hip_y` if hips visible, else `shoulder_y + 120 % × shoulder_width` |
+| Left / Right | `shoulder edges ± 15 % × shoulder_width` |
+
+**Bartula pipeline (per frame):**
+
+```
+Frame ROI (grayscale)
+  → _make_profile       : mean(row) + std(row) → high-pass → 1D vector (H,)
+  → _profile_shift      : Hann window → FFT cross-correlation → sub-pixel peak
+                          r = F⁻¹( F(pₜ) · conj(F(pₜ₋₁)) )
+  → integrate shift     : position += shift  (chest displacement signal)
+  → _global_motion      : block diff > MOTION_THRESH → flag frame
+  → apply_filters       : detrend + Butterworth [0.1–0.5 Hz]
+  → _estimate_rr_from_peaks : find_peaks → validate each breath interval
+                              (duration ∈ [1.5, 10] s, motion_ratio < 0.5)
+  → median(valid intervals) → rpm → EMA → rr_estimate
+```
+
+**Parameters:**
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ROI_PAD_X_FACTOR` | 0.15 | Horizontal ROI padding as fraction of shoulder width |
+| `ROI_HEIGHT_FACTOR` | 1.20 | Estimated chest height as fraction of shoulder width (no hips) |
+| `ROI_TOP_FACTOR` | 0.10 | ROI top margin above shoulder line |
+| `HP_KERNEL` | 21 | Moving-average kernel for profile high-pass |
+| `BLOCK_SIZE` | 16 px | Block size for motion detector |
+| `MOTION_THRESH` | 12 | Mean abs diff threshold per block |
+| `GLOBAL_MOTION_RATIO` | 0.30 | Moving-block fraction to flag global motion |
+| `MIN_SEC` | 20 s | Minimum signal window before first estimate |
+| `RR_ALPHA` | 0.15 | EMA smoothing factor |
+| `MIN_BREATH_S` | 1.5 s | Shortest valid breath (≈ 40 rpm) |
+| `MAX_BREATH_S` | 10.0 s | Longest valid breath (6 rpm) |
+
+> The ROI rectangle is drawn in yellow (normal) or red (global motion detected). If Pose does not detect the subject within 15 s the program raises an error — no measurement without a valid chest ROI.
+
+---
+
 ### `evaluate.py`
 
 Offline evaluation script. Reads a results CSV and computes MAE, RMSE and PCC per algorithm, with optional breakdown by ROI mode and source.
@@ -301,9 +384,10 @@ python main.py
 ```
 
 The program prompts:
-1. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
-2. rPPG algorithm: `1` GREEN · `2` OMIT · `3` POS_WANG · `4` LMS
-3. ROI mode: `1` Forehead · `2` Full face · `3` Multi-region (DMRS)
+1. Mode: `1` rPPG · `2` Respiratory
+2. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
+3. *(rPPG only)* Algorithm: `1` GREEN · `2` OMIT · `3` POS_WANG · `4` LMS
+4. *(rPPG only)* ROI mode: `1` Forehead · `2` Full face · `3` Multi-region (DMRS)
 
 Press `q` to stop.
 
@@ -327,6 +411,7 @@ python evaluate.py results.csv --plot --save
 - [x] Real-time HR via FFT (every 30 frames)
 - [x] LMS motion artifact cancellation with IMU
 - [x] Evaluation script: MAE / RMSE / PCC from CSV
+- [x] Respiratory rate via MediaPipe Pose (thorax movement, 0.1–0.5 Hz)
 - [ ] Peak detection → RR intervals → HRV (SDNN, RMSSD, LF, HF, LF/HF)
 - [ ] IMU-based motion compensation for GREEN / OMIT / POS
 - [ ] Clinical validation against oximeter ground truth

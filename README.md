@@ -18,9 +18,10 @@ Drone_rPPG/
 │   └── partitions.csv
 │
 ├── software/                # Python code (PC / Ground Station)
-│   ├── main.py              # Entry point: selects source, algorithm and ROI mode
+│   ├── main.py              # Entry point: selects mode, source, algorithm and ROI
 │   ├── DataHandler.py       # CameraHandler, WebcamHandler, IMUHandler
-│   ├── Processor.py         # FaceProcessor: ROI, RGB extraction, real-time HR
+│   ├── Processor.py         # FaceProcessor: ROI, RGB extraction, real-time HR (rPPG)
+│   ├── RespiratoryProcessor.py  # RespiratoryProcessor: pose tracking, real-time RR
 │   ├── ROIExtraction.py     # ROI modes, face polygon, 9×9 grid, DMRS selection
 │   ├── evaluate.py          # Offline evaluation: MAE, RMSE, PCC from CSV
 │   ├── SOFTWARE.md          # Software technical documentation
@@ -38,7 +39,7 @@ Drone_rPPG/
 | Component | Model | Notes |
 |-----------|-------|-------|
 | MCU | Seeed Studio XIAO ESP32-S3 Sense | 8 MB PSRAM + 8 MB Flash |
-| Camera | OV3660 | QQVGA 160×120, ~25 FPS, MJPEG |
+| Camera | OV3660 | QVGA 320×240, ~25 FPS, MJPEG |
 | IMU | MPU-6050 | I2C, 500 Hz, ±16 g / ±2000°/s |
 | Motors | 4× brushed DC | LEDC PWM 15 kHz, 8-bit (GPIO 2/3/4/7) |
 | Battery | LiPo 1S | ADC monitoring on GPIO 1 |
@@ -72,9 +73,10 @@ Developed in **Python 3.11** with OpenCV, MediaPipe and NumPy/SciPy.
 
 | Module | Function |
 |--------|----------|
-| `main.py` | Selects video source, rPPG algorithm and ROI mode at startup |
+| `main.py` | Selects mode (rPPG / Respiratory), source, algorithm and ROI at startup |
 | `DataHandler.py` | `CameraHandler` (MJPEG), `WebcamHandler` (webcam), `IMUHandler` (polling `/imu`) |
-| `Processor.py` | FaceMesh → ROI → RGB/frame → real-time HR (background thread) |
+| `Processor.py` | FaceMesh → ROI → RGB/frame → real-time HR (rPPG mode) |
+| `RespiratoryProcessor.py` | Bartula 2013: chest ROI → 1D profile cross-correlation → real-time RR |
 | `ROIExtraction.py` | ROI modes, polygon extraction, 9×9 grid, DMRS region selection |
 | `evaluate.py` | MAE / RMSE / PCC evaluation from a ground-truth CSV |
 | `algoritmos/green.py` | Direct green channel |
@@ -98,7 +100,12 @@ pip install opencv-python mediapipe requests numpy scipy matplotlib pandas
 python main.py
 ```
 
-The program prompts for the video source, rPPG algorithm and ROI mode. Press `q` to stop.
+The program prompts for the operating mode, video source, and (in rPPG mode) algorithm and ROI. Press `q` to stop.
+
+| Mode | Measures | Method |
+|------|----------|--------|
+| **rPPG** | Heart rate (BPM) | FaceMesh → face ROI → colour signal |
+| **Respiratory** | Breathing rate (rpm) | Bartula 2013 — chest ROI cross-correlation, no landmarks |
 
 ### Evaluate
 
@@ -110,6 +117,7 @@ Expects a CSV with columns `HR_gt`, `HR_GREEN`, `HR_OMIT`, `HR_POS_WANG`, `HR_LM
 
 ## How It Works
 
+**rPPG mode (heart rate):**
 ```
 OV3660 (MJPEG)  ──→  CameraHandler  ──→  FaceProcessor
 MPU-6050        ──→  IMUHandler     ──┘
@@ -128,6 +136,38 @@ MPU-6050        ──→  IMUHandler     ──┘
                               Detrend + Butterworth [0.75–4 Hz]
                                          │
                                     FFT → BPM
+```
+
+**Respiratory mode (breathing rate) — Bartula et al. 2013:**
+```
+OV3660 (MJPEG)  ──→  CameraHandler  ──→  RespiratoryProcessor
+                                         │
+                                 ┌── STARTUP (once) ──┐
+                                 │  MediaPipe Pose     │
+                                 │  detect shoulders   │
+                                 │  → chest ROI (px)  │
+                                 │  close Pose         │
+                                 └────────────────────┘
+                                         │
+                                   Fixed chest ROI
+                                         │
+                           1D vertical profile (mean + std / row)
+                           High-pass (removes illumination drift)
+                                         │
+                           Phase cross-correlation (Hann window)
+                           r = F⁻¹( F(pₜ) · conj(F(pₜ₋₁)) )
+                           Sub-pixel peak → frame shift
+                                         │
+                           Integrate shifts → chest position signal
+                                         │
+                           Global motion detector (block-based)
+                                         │
+                           Detrend + Butterworth [0.1–0.5 Hz]
+                                         │
+                           Peak detection → breath-by-breath validation
+                           (exclude motion segments, invalid durations)
+                                         │
+                           Median inter-breath interval → rpm
 ```
 
 See [FIRMWARE.md](firmware/FIRMWARE.md) and [SOFTWARE.md](software/SOFTWARE.md) for detailed documentation.
