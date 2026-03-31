@@ -8,17 +8,24 @@ Video acquisition and face detection software for rPPG (remote Photoplethysmogra
 
 ```
 software/
-├── main.py                      # Entry point: selects mode, source, algorithm and ROI
+├── main.py                      # Entry point: selects mode, source, algorithm, ROI and display
 ├── DataHandler.py               # CameraHandler, WebcamHandler, IMUHandler
 ├── Processor.py                 # FaceProcessor: ROI, RGB extraction, real-time HR (rPPG)
 ├── RespiratoryProcessor.py      # RespiratoryProcessor: pose tracking, real-time RR
 ├── ROIExtraction.py             # ROI modes, face polygon, grid extraction, DMRS
 ├── evaluate.py                  # Offline evaluation: MAE, RMSE, PCC from CSV
-└── algoritmos/
-    ├── green.py                 # GREEN algorithm (Verkruysse 2008)
-    ├── omit.py                  # OMIT algorithm (Casado & López 2023)
-    ├── pos_wang.py              # POS algorithm (Wang et al. 2017)
-    └── adaptive_lms.py          # Adaptive NLMS filter with IMU (drone only)
+├── algoritmos/
+│   ├── green.py                 # GREEN algorithm (Verkruysse 2008)
+│   ├── omit.py                  # OMIT algorithm (Casado & López 2023)
+│   ├── pos_wang.py              # POS algorithm (Wang et al. 2017)
+│   └── adaptive_lms.py          # Adaptive NLMS filter with IMU (drone only)
+└── validation/
+    ├── SensorIntegration.ino        # Arduino: PPG + respiration sensors → Serial (115200 baud)
+    ├── PPG2csv.py                   # Record rPPG + hardware PPG simultaneously → CSV
+    ├── Resp2csv.py                  # Record RR + hardware respiration sensor → CSV
+    ├── Validation_rPPG_PPG.py       # Live rPPG vs hardware PPG comparison
+    ├── Validation_Resp_Resp.py      # Live RR vs hardware respiration comparison
+    └── Validation_rPPG_SMARTLOCK.py # rPPG vs SMARTLOCK reference device
 ```
 
 ---
@@ -44,15 +51,19 @@ Frame (camera / webcam)
 
 ### `main.py`
 
-Entry point. Prompts the user for the operating mode, video source, rPPG algorithm and ROI mode, then starts the main loop.
+Entry point. Prompts the user for the operating mode, display preference, video source, rPPG algorithm and ROI mode, then starts the main loop.
 
-**Mode selection:**
+**Startup prompts (in order):**
 
-| Option | Mode | Processor | Description |
-|--------|------|-----------|-------------|
-| `1` | rPPG | `FaceProcessor` | Heart rate from facial colour changes |
-| `2` | Respiratory | `RespiratoryProcessor` | Breathing rate from thorax movement |
+| Step | Options | Description |
+|------|---------|-------------|
+| Mode | `1` rPPG · `2` Respiratory | `FaceProcessor` or `RespiratoryProcessor` |
+| Display | `1` Sim · `2` Não | Show matplotlib graphs + camera window, or terminal only |
+| Source | `A` Drone · `B` Webcam | MJPEG stream or local webcam |
+| Algorithm | `1`–`4` *(rPPG only)* | GREEN, OMIT, POS_WANG, LMS |
+| ROI | `1`–`3` *(rPPG only)* | FOREHEAD, FACE, MULTI |
 
+- **Display mode 2 (terminal only)** skips all `matplotlib` and `cv2.imshow` calls, significantly increasing FPS by eliminating rendering overhead.
 - **Source A — Drone:** `CameraHandler` (MJPEG stream) + `IMUHandler` (polling `/imu`, rPPG mode only); fixed IP `http://192.168.4.1`
 - **Source B — Webcam:** `WebcamHandler` (local OpenCV VideoCapture)
 - **Available algorithms (rPPG only):** GREEN, OMIT, POS_WANG, LMS (LMS only in drone mode)
@@ -153,7 +164,7 @@ Processes frames with MediaPipe FaceMesh, extracts the RGB signal, runs rPPG alg
 
 | Method | Description |
 |--------|-------------|
-| `__init__(camera, imu, algo, roi)` | Initializes FaceMesh, signal buffers, background threads |
+| `__init__(camera, imu, algo, roi, display)` | Initializes FaceMesh, signal buffers, background threads; `display=False` disables all rendering |
 | `process_frame(frame)` | Resizes to 320×240, runs FaceMesh, extracts ROI RGB, draws overlay |
 | `get_fps(window=60)` | Estimates FPS from real timestamps; fallback 27.0 Hz |
 | `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] |
@@ -196,7 +207,7 @@ Estimates respiratory rate (RR) in real time using the **Bartula (2013)** camera
 
 | Method | Description |
 |--------|-------------|
-| `__init__(camera)` | Initialises signal buffers, position integrator and background thread state |
+| `__init__(camera, display)` | Initialises signal buffers, position integrator and background thread state; `display=False` disables all rendering |
 | `_init_roi_from_pose(timeout)` | Runs Pose on live frames until shoulders detected; computes chest ROI; closes Pose. Raises `RuntimeError` on timeout. |
 | `process_frame(frame)` | Extracts profile, computes shift, integrates position, detects global motion |
 | `get_fps(window=60)` | Estimates FPS from recent timestamps; fallback 25.0 Hz |
@@ -258,6 +269,51 @@ Frame ROI (grayscale)
 | `MAX_BREATH_S` | 10.0 s | Longest valid breath (6 rpm) |
 
 > The ROI rectangle is drawn in yellow (normal) or red (global motion detected). If Pose does not detect the subject within 15 s the program raises an error — no measurement without a valid chest ROI.
+
+---
+
+### `validation/`
+
+Hardware-synchronized validation scripts. All scripts read a hardware reference sensor via Serial (Arduino at 115200 baud, `COM5`) and synchronize it with the software pipeline in real time.
+
+**`SensorIntegration.ino`** — Arduino sketch that reads an analog PPG sensor (pin `A6`) and a respiration sensor (pin `A5`) and streams timestamped samples over Serial at 115200 baud.
+
+---
+
+**`PPG2csv.py`** — Records rPPG and hardware PPG simultaneously and saves to CSV for offline evaluation.
+
+- Reads hardware PPG from Serial while running `FaceProcessor`
+- Saves synchronized timestamps, hardware PPG raw values and rPPG HR estimates
+- Plots both signals in real time
+
+**`Resp2csv.py`** — Records respiratory rate and hardware respiration sensor simultaneously and saves to CSV.
+
+- Reads hardware respiration signal from Serial while running `RespiratoryProcessor`
+- Saves synchronized timestamps and RR estimates
+
+---
+
+**`Validation_rPPG_PPG.py`** — Live side-by-side comparison of rPPG vs hardware PPG reference.
+
+- Runs `FaceProcessor` and reads hardware PPG from Serial in parallel
+- Displays both BVP signals and HR estimates in real time
+
+**`Validation_Resp_Resp.py`** — Live comparison of software RR vs hardware respiration sensor.
+
+- Runs `RespiratoryProcessor` and reads hardware respiration from Serial in parallel
+- Displays both position signals and RR estimates side by side
+
+**`Validation_rPPG_SMARTLOCK.py`** — Compares rPPG HR estimates against a SMARTLOCK medical reference device via Serial.
+
+---
+
+**Common configuration** (top of each validation script):
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `SERIAL_PORT` | `COM5` | Serial port of the Arduino |
+| `BAUD_RATE` | `115200` | Must match `SensorIntegration.ino` |
+| `XIAO_IP` | `http://192.168.4.1` | Drone IP (ignored when using webcam) |
 
 ---
 
@@ -385,9 +441,10 @@ python main.py
 
 The program prompts:
 1. Mode: `1` rPPG · `2` Respiratory
-2. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
-3. *(rPPG only)* Algorithm: `1` GREEN · `2` OMIT · `3` POS_WANG · `4` LMS
-4. *(rPPG only)* ROI mode: `1` Forehead · `2` Full face · `3` Multi-region (DMRS)
+2. Display: `1` graphs + camera · `2` terminal only (higher FPS)
+3. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
+4. *(rPPG only)* Algorithm: `1` GREEN · `2` OMIT · `3` POS_WANG · `4` LMS
+5. *(rPPG only)* ROI mode: `1` Forehead · `2` Full face · `3` Multi-region (DMRS)
 
 Press `q` to stop.
 
@@ -412,6 +469,8 @@ python evaluate.py results.csv --plot --save
 - [x] LMS motion artifact cancellation with IMU
 - [x] Evaluation script: MAE / RMSE / PCC from CSV
 - [x] Respiratory rate via MediaPipe Pose (thorax movement, 0.1–0.5 Hz)
+- [x] Display toggle: full visual mode vs terminal-only (improved FPS)
+- [x] Hardware-synchronized validation scripts (PPG, respiration, SMARTLOCK)
 - [ ] Peak detection → RR intervals → HRV (SDNN, RMSSD, LF, HF, LF/HF)
 - [ ] IMU-based motion compensation for GREEN / OMIT / POS
 - [ ] Clinical validation against oximeter ground truth
