@@ -68,7 +68,9 @@ def extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean):
 
     Returns
     -------
-    np.ndarray, shape (GRID_N*GRID_N, 3)
+    means : np.ndarray, shape (GRID_N*GRID_N, 3)
+    valid : np.ndarray, shape (GRID_N*GRID_N,), dtype bool
+        True for cells with enough skin pixels to be used in DMRS.
     """
     x_min = int(max(0, poly[:, 0].min()))
     x_max = int(min(w, poly[:, 0].max()))
@@ -79,6 +81,7 @@ def extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean):
 
     K     = GRID_N * GRID_N
     means = np.tile(face_mean.astype(np.float32), (K, 1))
+    valid = np.zeros(K, dtype=bool)
 
     for row in range(GRID_N):
         for col in range(GRID_N):
@@ -90,8 +93,9 @@ def extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean):
             pixels    = rgb[y0:y1, x0:x1][cell_face == 255]
             if len(pixels) >= MIN_REGION_PIXELS:
                 means[row * GRID_N + col] = pixels.mean(axis=0)
+                valid[row * GRID_N + col] = True
 
-    return means
+    return means, valid
 
 
 # ── DMRS — Dynamic Multi-Region Selection (Face2PPG) ─────────────────────────
@@ -194,18 +198,22 @@ def draw_grid_overlay(frame, poly, h, w, selected_indices):
     return frame
 
 
-def dmrs_select(region_signals, fs, r_max=R_MAX, kfd_thresh=0.85):
+def dmrs_select(region_signals, fs, r_max=R_MAX, kfd_thresh=0.85, valid_mask=None):
     """
     Dynamic Multi-Region Selection (Face2PPG, Casado & Lopez 2023).
-    DFA omitted for real-time performance — variance + KFD + spectral energy.
+    DFA omitted for real-time performance — validity mask + KFD + spectral SNR.
 
     Parameters
     ----------
     region_signals : np.ndarray (N_frames, K_regions)
         Green-channel signal per region over time.
-    fs        : float  Sampling frequency in Hz.
-    r_max     : int    Max regions to return.
-    kfd_thresh: float  Relative KFD threshold.
+    fs         : float  Sampling frequency in Hz.
+    r_max      : int    Max regions to return.
+    kfd_thresh : float  Relative KFD threshold.
+    valid_mask : np.ndarray (K_regions,) bool or None
+        If provided, only regions marked True are considered.
+        Cells outside the face oval (filled with face_mean fallback) must be
+        excluded here to avoid contaminating the ranking.
 
     Returns
     -------
@@ -213,8 +221,13 @@ def dmrs_select(region_signals, fs, r_max=R_MAX, kfd_thresh=0.85):
     """
     N, K = region_signals.shape
 
+    # 0 — Restrict to cells with enough skin pixels (exclude face_mean fallbacks)
+    candidates = [i for i in range(K) if valid_mask is None or valid_mask[i]]
+    if not candidates:
+        candidates = list(range(K))
+
     # 1 — Discard zero-variance regions
-    valid = [i for i in range(K) if np.var(region_signals[:, i]) > 0]
+    valid = [i for i in candidates if np.var(region_signals[:, i]) > 0]
     if not valid:
         return list(range(min(r_max, K)))
 
@@ -226,11 +239,18 @@ def dmrs_select(region_signals, fs, r_max=R_MAX, kfd_thresh=0.85):
     if not kfd_valid:
         kfd_valid = valid
 
-    # 3 — Rank by spectral energy in HR band [0.75–4.0 Hz]
+    # 3 — Rank by spectral SNR in HR band [0.75–4.0 Hz]
+    #     SNR = band_energy / out-of-band_energy
+    #     Noisy regions (beard, sides) have broadband energy → low SNR.
+    #     Regions with a clean cardiac signal concentrate energy in the band → high SNR.
     freqs = np.fft.rfftfreq(N, d=1.0 / fs)
     band  = (freqs >= 0.75) & (freqs <= 4.0)
     ffts  = np.abs(np.fft.rfft(region_signals[:, kfd_valid], axis=0)) ** 2
-    energies = [(kfd_valid[j], float(np.sum(ffts[band, j])))
-                for j in range(len(kfd_valid))]
-    energies.sort(key=lambda x: -x[1])
-    return [i for i, _ in energies[:r_max]]
+    snrs  = []
+    for j in range(len(kfd_valid)):
+        band_e  = float(np.sum(ffts[band, j]))
+        total_e = float(np.sum(ffts[:, j]))
+        snr     = band_e / (total_e - band_e + 1e-10)
+        snrs.append((kfd_valid[j], snr))
+    snrs.sort(key=lambda x: -x[1])
+    return [i for i, _ in snrs[:r_max]]

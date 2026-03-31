@@ -52,6 +52,7 @@ class FaceProcessor:
 
         self.rgb_signal          = []   # list of [R_mean, G_mean, B_mean] per frame (full face)
         self.region_rgb          = []   # list of (K, 3) arrays per frame — grid regions
+        self.region_valid        = []   # list of (K,) bool arrays — cells with enough skin pixels
         self.frame_timestamps    = []
         self.hr_estimate         = None
         self.landmark_ema        = None
@@ -115,9 +116,11 @@ class FaceProcessor:
                     self.rgb_signal.append(face_mean)
                     self.frame_timestamps.append(time.time())
                     if self.roi == ROI_MULTI:
-                        self.region_rgb.append(
-                            extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean)
+                        grid_means, grid_valid = extract_grid_rgb(
+                            rgb, face_mask, poly, h, w, face_mean
                         )
+                        self.region_rgb.append(grid_means)
+                        self.region_valid.append(grid_valid)
 
                 cv2.polylines(small, [poly], isClosed=True, color=(0, 255, 255), thickness=1)
                 if self.roi == ROI_MULTI:
@@ -249,9 +252,12 @@ class FaceProcessor:
             with self._hr_lock:
                 self._hr_computing = False
             return
-        region_win = np.array(self.region_rgb[-window:])
-        green_win  = region_win[:, :, 1]
-        selected   = dmrs_select(green_win, fs, r_max=R_MAX)
+        region_win   = np.array(self.region_rgb[-window:])
+        green_win    = region_win[:, :, 1]
+        # A cell is valid for DMRS if it had enough skin pixels in ≥50% of frames
+        valid_arrays = np.array(self.region_valid[-window:])   # (window, K)
+        valid_mask   = valid_arrays.mean(axis=0) >= 0.5        # (K,) bool
+        selected     = dmrs_select(green_win, fs, r_max=R_MAX, valid_mask=valid_mask)
         with self._hr_lock:
             self._selected_regions = selected
             self._hr_computing = False
