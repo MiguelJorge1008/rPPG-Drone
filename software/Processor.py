@@ -356,7 +356,7 @@ class FaceProcessor:
                                          daemon=True).start()
 
                 # HR print to terminal
-                face_str = "SIM" if self._last_face_detected else "NÃO"
+                face_str = "YES" if self._last_face_detected else "NO"
                 roi_str  = f"ROI: {len(self.rgb_signal)} frames | fs: {self.get_fps():.1f} Hz"
                 if self.hr_estimate is not None:
                     for name, hr in self.hr_estimate.items():
@@ -365,7 +365,7 @@ class FaceProcessor:
                     n      = len(self.rgb_signal)
                     needed = max(int(30 * self.get_fps()), 64)
                     pct    = min(100, int(n / needed * 100))
-                    print(f"\rFace: {face_str} | {roi_str} | A recolher... {pct}%   ", end="", flush=True)
+                    print(f"\rFace: {face_str} | {roi_str} | Collecting... {pct}%   ", end="", flush=True)
 
                 if self.display:
                     # Update BVP plots only when background thread produced new results

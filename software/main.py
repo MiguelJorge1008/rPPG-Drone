@@ -24,9 +24,9 @@ if __name__ == "__main__":
     print("  2 - Respiratory  (breathing rate from thorax movement)")
     mode_choice = input("Option [1/2]: ").strip()
 
-    print("\nMostrar gráficos e câmara?")
-    print("  1 - Sim (gráficos + câmara)")
-    print("  2 - Não (só terminal)")
+    print("\nShow graphs and camera window?")
+    print("  1 - Yes (graphs + camera)")
+    print("  2 - No  (terminal only)")
     display = input("Option [1/2]: ").strip() != "2"
 
     print("\nSelect video source:")

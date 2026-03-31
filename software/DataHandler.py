@@ -34,7 +34,7 @@ class CameraHandler:
         while self.running:
             try:
                 response = requests.get(stream_url, stream=True, timeout=10)
-                print(f"Stream ligado — Content-Type: {response.headers.get('Content-Type')}")
+                print(f"Stream connected — Content-Type: {response.headers.get('Content-Type')}")
                 buffer = bytes()
                 for chunk in response.iter_content(chunk_size=4096):
                     if not self.running:
@@ -43,19 +43,19 @@ class CameraHandler:
                     start = buffer.find(b'\xff\xd8')  # JPEG start marker
                     end   = buffer.find(b'\xff\xd9')  # JPEG end marker
                     if start == -1:
-                        buffer = bytes()              # sem início — descarta tudo
+                        buffer = bytes()              # no start marker — discard
                     elif end == -1:
-                        buffer = buffer[start:]       # aguarda mais dados para completar o JPEG
+                        buffer = buffer[start:]       # wait for more data to complete JPEG
                     elif end > start:
                         jpg = buffer[start:end+2]
                         buffer = buffer[end+2:]
                         frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
                         if frame is not None:
                             if self.frame is None:
-                                print("Primeiro frame recebido!")
+                                print("First frame received!")
                             self.frame = frame
             except Exception as e:
-                print(f"Stream erro: {e} — a reconectar em 2s...")
+                print(f"Stream error: {e} — reconnecting in 2s...")
                 time.sleep(2)
 
     def get_frame(self):

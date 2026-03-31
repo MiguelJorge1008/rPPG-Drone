@@ -106,7 +106,7 @@ class RespiratoryProcessor:
         ----------
         timeout : float   Maximum seconds to wait for a valid detection.
         """
-        print("A detetar posição do tórax com Pose... (aponte a câmara ao peito)")
+        print("Detecting thorax position with Pose... (point the camera at the chest)")
 
         pose = _mp_pose.Pose(
             model_complexity=1,
@@ -134,7 +134,7 @@ class RespiratoryProcessor:
 
             if self.display:
                 preview = frame.copy()
-                cv2.putText(preview, "A detetar torax... aguarde",
+                cv2.putText(preview, "Detecting thorax... please wait",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             if res.pose_landmarks:
@@ -168,7 +168,7 @@ class RespiratoryProcessor:
                     if self.display:
                         # Draw detected ROI and hold for confirmation
                         cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(preview, "ROI detetada — a iniciar",
+                        cv2.putText(preview, "ROI detected — starting",
                                     (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                         cv2.imshow('Respiratory Rate — Bartula 2013', preview)
@@ -185,8 +185,8 @@ class RespiratoryProcessor:
 
         pose.close()
         raise RuntimeError(
-            "Timeout: nenhuma pessoa detetada em {:.0f} s. "
-            "Verifique se a câmara aponta ao tórax.".format(timeout)
+            "Timeout: no person detected in {:.0f} s. "
+            "Make sure the camera is pointing at the chest.".format(timeout)
         )
 
     # ── Profile extraction ────────────────────────────────────────────────────
@@ -479,7 +479,7 @@ class RespiratoryProcessor:
                 else:
                     needed = max(int(MIN_SEC * self.get_fps()), 64)
                     pct    = min(100, int(n / needed * 100))
-                    print(f"\rFrames: {n} | A recolher... {pct}%{motion_str}   ",
+                    print(f"\rFrames: {n} | Collecting... {pct}%{motion_str}   ",
                           end="", flush=True)
 
                 if self.display:
