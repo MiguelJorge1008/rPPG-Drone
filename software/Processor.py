@@ -24,7 +24,7 @@ HR_ALPHA       = 0.1
 
 class FaceProcessor:
     def __init__(self, camera: CameraHandler, imu=None, algo: str = "GREEN",
-                 roi: str = ROI_FACE):
+                 roi: str = ROI_FACE, display: bool = True):
         """
         Initialises the FaceProcessor.
 
@@ -37,10 +37,11 @@ class FaceProcessor:
         algo : str
             Algorithm to use: "GREEN", "OMIT", "POS_WANG", or "LMS".
         """
-        self.camera = camera
-        self.imu    = imu
-        self.algo   = algo
-        self.roi    = roi
+        self.camera   = camera
+        self.imu      = imu
+        self.algo     = algo
+        self.roi      = roi
+        self.display  = display
 
         self.face_mesh = mp_face_mesh.FaceMesh(
             max_num_faces=1,
@@ -277,49 +278,50 @@ class FaceProcessor:
 
     def run(self):
         """Acquisition, display and real-time plot loop. Press 'q' to quit."""
-        import matplotlib.pyplot as plt
+        if self.display:
+            import matplotlib.pyplot as plt
 
-        plt.ion()
+            plt.ion()
 
-        # RGB figure
-        fig_rgb, axes_rgb = plt.subplots(3, 1, figsize=(8, 4), sharex=True)
-        fig_rgb.suptitle('RGB Signal')
-        lines_rgb = []
-        for ax, color, label in zip(axes_rgb, ['#ff4444', '#44dd88', '#4488ff'], ['R', 'G', 'B']):
-            line, = ax.plot([], [], color=color, linewidth=0.8)
-            ax.set_ylabel(label)
-            lines_rgb.append(line)
-        axes_rgb[-1].set_xlabel('Frame')
-        fig_rgb.tight_layout()
+            # RGB figure
+            fig_rgb, axes_rgb = plt.subplots(3, 1, figsize=(8, 4), sharex=True)
+            fig_rgb.suptitle('RGB Signal')
+            lines_rgb = []
+            for ax, color, label in zip(axes_rgb, ['#ff4444', '#44dd88', '#4488ff'], ['R', 'G', 'B']):
+                line, = ax.plot([], [], color=color, linewidth=0.8)
+                ax.set_ylabel(label)
+                lines_rgb.append(line)
+            axes_rgb[-1].set_xlabel('Frame')
+            fig_rgb.tight_layout()
 
-        # BVP figure (algorithm selected at startup)
-        _algo_colors = {'GREEN': '#00e676', 'OMIT': '#448aff',
-                        'POS_WANG': '#ff9100', 'LMS': '#e040fb'}
-        fig_bvp, ax_bvp = plt.subplots(1, 1, figsize=(8, 2))
-        fig_bvp.suptitle('BVP Signal')
-        line_bvp, = ax_bvp.plot([], [], color=_algo_colors.get(self.algo, '#00e676'), linewidth=0.8)
-        ax_bvp.set_ylabel(self.algo)
-        ax_bvp.set_xlabel('Frame (window)')
-        lines_bvp = [line_bvp]
-        fig_bvp.tight_layout()
+            # BVP figure (algorithm selected at startup)
+            _algo_colors = {'GREEN': '#00e676', 'OMIT': '#448aff',
+                            'POS_WANG': '#ff9100', 'LMS': '#e040fb'}
+            fig_bvp, ax_bvp = plt.subplots(1, 1, figsize=(8, 2))
+            fig_bvp.suptitle('BVP Signal')
+            line_bvp, = ax_bvp.plot([], [], color=_algo_colors.get(self.algo, '#00e676'), linewidth=0.8)
+            ax_bvp.set_ylabel(self.algo)
+            ax_bvp.set_xlabel('Frame (window)')
+            lines_bvp = [line_bvp]
+            fig_bvp.tight_layout()
 
-        # IMU figure
-        if self.imu is not None:
-            fig_imu, axes_imu = plt.subplots(2, 1, figsize=(8, 4), sharex=True)
-            fig_imu.suptitle('IMU — MPU-6050')
-            lines_accel, lines_gyro = [], []
-            for color, label in zip(['#ff4444', '#44dd88', '#4488ff'], ['ax', 'ay', 'az']):
-                l, = axes_imu[0].plot([], [], color=color, linewidth=0.8, label=label)
-                lines_accel.append(l)
-            axes_imu[0].set_ylabel('Accel (g)')
-            axes_imu[0].legend(fontsize=7)
-            for color, label in zip(['#ff4444', '#44dd88', '#4488ff'], ['gx', 'gy', 'gz']):
-                l, = axes_imu[1].plot([], [], color=color, linewidth=0.8, label=label)
-                lines_gyro.append(l)
-            axes_imu[1].set_ylabel('Gyro (°/s)')
-            axes_imu[1].set_xlabel('Sample')
-            axes_imu[1].legend(fontsize=7)
-            fig_imu.tight_layout()
+            # IMU figure
+            if self.imu is not None:
+                fig_imu, axes_imu = plt.subplots(2, 1, figsize=(8, 4), sharex=True)
+                fig_imu.suptitle('IMU — MPU-6050')
+                lines_accel, lines_gyro = [], []
+                for color, label in zip(['#ff4444', '#44dd88', '#4488ff'], ['ax', 'ay', 'az']):
+                    l, = axes_imu[0].plot([], [], color=color, linewidth=0.8, label=label)
+                    lines_accel.append(l)
+                axes_imu[0].set_ylabel('Accel (g)')
+                axes_imu[0].legend(fontsize=7)
+                for color, label in zip(['#ff4444', '#44dd88', '#4488ff'], ['gx', 'gy', 'gz']):
+                    l, = axes_imu[1].plot([], [], color=color, linewidth=0.8, label=label)
+                    lines_gyro.append(l)
+                axes_imu[1].set_ylabel('Gyro (°/s)')
+                axes_imu[1].set_xlabel('Sample')
+                axes_imu[1].legend(fontsize=7)
+                fig_imu.tight_layout()
 
         HR_ALPHA = 0.1
 
@@ -353,24 +355,7 @@ class FaceProcessor:
                         threading.Thread(target=self._compute_hr_background,
                                          daemon=True).start()
 
-                # Update BVP plots only when background thread produced new results
-                with self._hr_lock:
-                    if self._bvps_fresh:
-                        bvps = self._latest_bvps
-                        self._bvps_fresh = False
-                    else:
-                        bvps = None
-                if bvps is not None:
-                    for line, (name, bvp) in zip(lines_bvp, bvps.items()):
-                        line.set_xdata(np.arange(len(bvp)))
-                        line.set_ydata(bvp)
-                        ax = line.axes
-                        ax.relim()
-                        ax.autoscale_view()
-                    fig_bvp.canvas.draw()
-                    fig_bvp.canvas.flush_events()
-
-                # HR print to terminal (camera display disabled)
+                # HR print to terminal
                 face_str = "SIM" if self._last_face_detected else "NÃO"
                 roi_str  = f"ROI: {len(self.rgb_signal)} frames | fs: {self.get_fps():.1f} Hz"
                 if self.hr_estimate is not None:
@@ -382,46 +367,65 @@ class FaceProcessor:
                     pct    = min(100, int(n / needed * 100))
                     print(f"\rFace: {face_str} | {roi_str} | A recolher... {pct}%   ", end="", flush=True)
 
-                cv2.imshow('rPPG', annotated)
-
-                # Update RGB + IMU every 5 frames
-                if len(self.rgb_signal) % 5 == 0 and len(self.rgb_signal) > 0:
-                    sig = np.array(self.rgb_signal)
-                    n   = len(sig)
-                    x   = np.arange(n)
-                    for i, line in enumerate(lines_rgb):
-                        line.set_xdata(x)
-                        line.set_ydata(sig[:, i])
-                    for ax in axes_rgb:
-                        ax.set_xlim(max(0, n - 300), max(300, n))
-                        ax.relim()
-                        ax.autoscale_view(scalex=False, scaley=True)
-                    fig_rgb.canvas.draw()
-                    fig_rgb.canvas.flush_events()
-
-                    if self.imu is not None and self.imu_signal:
-                        WIN  = 300
-                        data = self.imu_signal[-WIN:]
-                        n_i  = len(data)
-                        x_i  = np.arange(n_i)
-                        for line, field in zip(lines_accel, ['ax', 'ay', 'az']):
-                            line.set_xdata(x_i)
-                            line.set_ydata([s[field] for s in data])
-                        for line, field in zip(lines_gyro, ['gx', 'gy', 'gz']):
-                            line.set_xdata(x_i)
-                            line.set_ydata([s[field] for s in data])
-                        for ax in axes_imu:
+                if self.display:
+                    # Update BVP plots only when background thread produced new results
+                    with self._hr_lock:
+                        if self._bvps_fresh:
+                            bvps = self._latest_bvps
+                            self._bvps_fresh = False
+                        else:
+                            bvps = None
+                    if bvps is not None:
+                        for line, (name, bvp) in zip(lines_bvp, bvps.items()):
+                            line.set_xdata(np.arange(len(bvp)))
+                            line.set_ydata(bvp)
+                            ax = line.axes
                             ax.relim()
                             ax.autoscale_view()
-                        fig_imu.canvas.draw()
-                        fig_imu.canvas.flush_events()
+                        fig_bvp.canvas.draw()
+                        fig_bvp.canvas.flush_events()
+
+                    cv2.imshow('rPPG', annotated)
+
+                    # Update RGB + IMU every 5 frames
+                    if len(self.rgb_signal) % 5 == 0 and len(self.rgb_signal) > 0:
+                        sig = np.array(self.rgb_signal)
+                        n   = len(sig)
+                        x   = np.arange(n)
+                        for i, line in enumerate(lines_rgb):
+                            line.set_xdata(x)
+                            line.set_ydata(sig[:, i])
+                        for ax in axes_rgb:
+                            ax.set_xlim(max(0, n - 300), max(300, n))
+                            ax.relim()
+                            ax.autoscale_view(scalex=False, scaley=True)
+                        fig_rgb.canvas.draw()
+                        fig_rgb.canvas.flush_events()
+
+                        if self.imu is not None and self.imu_signal:
+                            WIN  = 300
+                            data = self.imu_signal[-WIN:]
+                            n_i  = len(data)
+                            x_i  = np.arange(n_i)
+                            for line, field in zip(lines_accel, ['ax', 'ay', 'az']):
+                                line.set_xdata(x_i)
+                                line.set_ydata([s[field] for s in data])
+                            for line, field in zip(lines_gyro, ['gx', 'gy', 'gz']):
+                                line.set_xdata(x_i)
+                                line.set_ydata([s[field] for s in data])
+                            for ax in axes_imu:
+                                ax.relim()
+                                ax.autoscale_view()
+                            fig_imu.canvas.draw()
+                            fig_imu.canvas.flush_events()
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
         finally:
             self.stop()
-            plt.ioff()
-            plt.show()
+            if self.display:
+                plt.ioff()
+                plt.show()
 
     # ── Teardown ──────────────────────────────────────────────────────────────
 

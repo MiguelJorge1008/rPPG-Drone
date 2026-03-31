@@ -24,6 +24,11 @@ if __name__ == "__main__":
     print("  2 - Respiratory  (breathing rate from thorax movement)")
     mode_choice = input("Option [1/2]: ").strip()
 
+    print("\nMostrar gráficos e câmara?")
+    print("  1 - Sim (gráficos + câmara)")
+    print("  2 - Não (só terminal)")
+    display = input("Option [1/2]: ").strip() != "2"
+
     print("\nSelect video source:")
     print("  A - Drone camera (XIAO ESP32)")
     print("  B - PC webcam")
@@ -37,7 +42,7 @@ if __name__ == "__main__":
         imu = None if mode_choice == "2" else IMUHandler(XIAO_IP)
 
     if mode_choice == "2":
-        processor = RespiratoryProcessor(cam)
+        processor = RespiratoryProcessor(cam, display=display)
         processor.run()
     else:
         print("\nSelect algorithm:")
@@ -59,5 +64,5 @@ if __name__ == "__main__":
         roi_choice = input("Option [1-3]: ").strip()
         roi = ROI_MAP.get(roi_choice, ROI_FACE)
 
-        processor = FaceProcessor(cam, imu, algo=algo, roi=roi)
+        processor = FaceProcessor(cam, imu, algo=algo, roi=roi, display=display)
         processor.run()

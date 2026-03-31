@@ -48,14 +48,17 @@ MAX_BREATH_S  = 10.0  # longest  valid breath (s)   →  6 rpm min
 
 
 class RespiratoryProcessor:
-    def __init__(self, camera):
+    def __init__(self, camera, display: bool = True):
         """
         Parameters
         ----------
         camera : CameraHandler or WebcamHandler
             Video source.
+        display : bool
+            Show camera window and matplotlib plots (default True).
         """
-        self.camera = camera
+        self.camera  = camera
+        self.display = display
 
         self.position_signal  = []   # integrated chest position per frame
         self.frame_timestamps = []
@@ -129,19 +132,21 @@ class RespiratoryProcessor:
             res   = pose.process(rgb)
             rgb.flags.writeable = True
 
-            preview = frame.copy()
-            cv2.putText(preview, "A detetar torax... aguarde",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            if self.display:
+                preview = frame.copy()
+                cv2.putText(preview, "A detetar torax... aguarde",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             if res.pose_landmarks:
                 lm = res.pose_landmarks.landmark
-                _mp_drawing.draw_landmarks(
-                    preview, res.pose_landmarks, _mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=_mp_drawing.DrawingSpec(
-                        color=(0, 255, 0), thickness=2, circle_radius=3),
-                    connection_drawing_spec=_mp_drawing.DrawingSpec(
-                        color=(0, 200, 255), thickness=1),
-                )
+                if self.display:
+                    _mp_drawing.draw_landmarks(
+                        preview, res.pose_landmarks, _mp_pose.POSE_CONNECTIONS,
+                        landmark_drawing_spec=_mp_drawing.DrawingSpec(
+                            color=(0, 255, 0), thickness=2, circle_radius=3),
+                        connection_drawing_spec=_mp_drawing.DrawingSpec(
+                            color=(0, 200, 255), thickness=1),
+                    )
 
                 if (lm[L_SH].visibility > 0.5 and lm[R_SH].visibility > 0.5):
                     sx1 = int(min(lm[L_SH].x, lm[R_SH].x) * w)
@@ -160,21 +165,23 @@ class RespiratoryProcessor:
                     else:
                         y2    = min(h, sy + int(sw * ROI_HEIGHT_FACTOR))
 
-                    # Draw detected ROI and hold for confirmation
-                    cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(preview, "ROI detetada — a iniciar",
-                                (x1, max(y1 - 8, 12)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                    cv2.imshow('Respiratory Rate — Bartula 2013', preview)
-                    cv2.waitKey(1000)                          # show ROI for 1 s
+                    if self.display:
+                        # Draw detected ROI and hold for confirmation
+                        cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(preview, "ROI detetada — a iniciar",
+                                    (x1, max(y1 - 8, 12)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        cv2.imshow('Respiratory Rate — Bartula 2013', preview)
+                        cv2.waitKey(1000)                      # show ROI for 1 s
 
                     self._fixed_roi = (y1, y2, x1, x2)
                     print(f" ROI: y=[{y1},{y2}] x=[{x1},{x2}]")
                     pose.close()
                     return
 
-            cv2.imshow('Respiratory Rate — Bartula 2013', preview)
-            cv2.waitKey(1)
+            if self.display:
+                cv2.imshow('Respiratory Rate — Bartula 2013', preview)
+                cv2.waitKey(1)
 
         pose.close()
         raise RuntimeError(
@@ -430,19 +437,20 @@ class RespiratoryProcessor:
 
     def run(self):
         """Acquisition, display and real-time plot loop. Press 'q' to quit."""
-        import matplotlib.pyplot as plt
-
         self._init_roi_from_pose()
 
-        plt.ion()
-        fig, (ax_raw, ax_filt) = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
-        fig.suptitle('Bartula Respiratory Signal')
-        line_raw,  = ax_raw.plot([], [],  color='#00bcd4', linewidth=0.8)
-        line_filt, = ax_filt.plot([], [], color='#ff9100', linewidth=0.8)
-        ax_raw.set_ylabel('Position (integrated shift, px)')
-        ax_filt.set_ylabel('Filtered [0.1–0.5 Hz]')
-        ax_filt.set_xlabel('Frame')
-        fig.tight_layout()
+        if self.display:
+            import matplotlib.pyplot as plt
+
+            plt.ion()
+            fig, (ax_raw, ax_filt) = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
+            fig.suptitle('Bartula Respiratory Signal')
+            line_raw,  = ax_raw.plot([], [],  color='#00bcd4', linewidth=0.8)
+            line_filt, = ax_filt.plot([], [], color='#ff9100', linewidth=0.8)
+            ax_raw.set_ylabel('Position (integrated shift, px)')
+            ax_filt.set_ylabel('Filtered [0.1–0.5 Hz]')
+            ax_filt.set_xlabel('Frame')
+            fig.tight_layout()
 
         try:
             while True:
@@ -474,37 +482,40 @@ class RespiratoryProcessor:
                     print(f"\rFrames: {n} | A recolher... {pct}%{motion_str}   ",
                           end="", flush=True)
 
-                # Update plots every 5 frames
-                if n % 5 == 0 and n > 0:
-                    WIN = 500
-                    raw = np.array(self.position_signal[-WIN:])
-                    x   = np.arange(max(0, n - WIN), n)
-                    line_raw.set_xdata(x)
-                    line_raw.set_ydata(raw)
-                    ax_raw.set_xlim(x[0], x[-1] + 1)
-                    ax_raw.relim()
-                    ax_raw.autoscale_view(scalex=False, scaley=True)
+                if self.display:
+                    # Update plots every 5 frames
+                    if n % 5 == 0 and n > 0:
+                        WIN = 500
+                        raw = np.array(self.position_signal[-WIN:])
+                        x   = np.arange(max(0, n - WIN), n)
+                        line_raw.set_xdata(x)
+                        line_raw.set_ydata(raw)
+                        ax_raw.set_xlim(x[0], x[-1] + 1)
+                        ax_raw.relim()
+                        ax_raw.autoscale_view(scalex=False, scaley=True)
 
-                    if len(raw) >= 64:
-                        try:
-                            filt = self.apply_filters(raw, self.get_fps())
-                            line_filt.set_xdata(x)
-                            line_filt.set_ydata(filt)
-                            ax_filt.relim()
-                            ax_filt.autoscale_view(scalex=False, scaley=True)
-                        except Exception:
-                            pass
+                        if len(raw) >= 64:
+                            try:
+                                filt = self.apply_filters(raw, self.get_fps())
+                                line_filt.set_xdata(x)
+                                line_filt.set_ydata(filt)
+                                ax_filt.relim()
+                                ax_filt.autoscale_view(scalex=False, scaley=True)
+                            except Exception:
+                                pass
 
-                    fig.canvas.draw()
-                    fig.canvas.flush_events()
+                        fig.canvas.draw()
+                        fig.canvas.flush_events()
 
-                cv2.imshow('Respiratory Rate — Bartula 2013', annotated)
+                    cv2.imshow('Respiratory Rate — Bartula 2013', annotated)
+
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
         finally:
             self.stop()
-            plt.ioff()
-            plt.show()
+            if self.display:
+                plt.ioff()
+                plt.show()
 
     # ── Teardown ──────────────────────────────────────────────────────────────
 
