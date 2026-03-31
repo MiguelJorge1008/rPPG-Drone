@@ -7,17 +7,30 @@ import matplotlib.pyplot as plt
 from collections import deque
 from scipy.signal import find_peaks, butter, filtfilt
 import heartpy as hp
-from DataHandler import WebcamHandler
+
+import sys
+import os
+
+# --- PATH MAGIC ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.insert(0, parent_dir)
+
+# --- CORRECTED IMPORTS ---
+from DataHandler import WebcamHandler, CameraHandler, IMUHandler
 from Processor import FaceProcessor
+from ROIExtraction import ROI_FOREHEAD, ROI_FACE, ROI_MULTI
 
 # --- CONFIGURATION ---
 SERIAL_PORT = 'COM5'  
 BAUD_RATE = 115200
 WINDOW_SIZE = 400     
 BUFFER_UPDATE = 5     
+XIAO_IP = "http://192.168.4.1"
 
 class ValidationPlotter:
-    def __init__(self, port, baud, algo="GREEN"):
+    # Updated signature to accept cam, imu, and roi
+    def __init__(self, port, baud, cam, imu=None, algo="GREEN", roi=ROI_FACE):
         self.hw_time = deque(maxlen=WINDOW_SIZE)
         self.hw_ppg = deque(maxlen=WINDOW_SIZE)
         self.current_rppg_bvp = None  
@@ -30,12 +43,12 @@ class ValidationPlotter:
             self.ser = None
             print("Warning: Arduino not found. Hardware plot will be empty.")
 
-        self.cam = WebcamHandler(index=0)
-        self.proc = FaceProcessor(self.cam, algo=algo)
+        self.cam = cam
+        self.proc = FaceProcessor(self.cam, imu=imu, algo=algo, roi=roi)
         
         plt.ion()
         self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        self.fig.suptitle(f'Demo Day Validation: Hardware PPG vs Camera rPPG ({algo})', fontsize=16)
+        self.fig.suptitle(f'Demo Day Validation: Hardware PPG vs Camera rPPG ({algo} | {roi})', fontsize=16)
         
         self.line_hw, = self.ax1.plot([], [], 'r-', label='Hardware PPG', lw=2)
         self.line_sw, = self.ax2.plot([], [], 'g-', label=f'rPPG ({algo})', lw=2)
@@ -108,7 +121,7 @@ class ValidationPlotter:
                     min_len = min(len(hw_t_list), len(hw_p_list))
                     
                     # ---------------------------------------------------------
-                    # 1. HARDWARE UPDATE (Uses HeartPy for gold-standard accuracy)
+                    # 1. HARDWARE UPDATE
                     # ---------------------------------------------------------
                     if min_len > 100:
                         hw_t_arr = np.array(hw_t_list[:min_len])
@@ -132,8 +145,8 @@ class ValidationPlotter:
                             except hp.exceptions.BadSignalWarning:
                                 self.txt_hw.set_text("BPM: -- | HRV: -- (Messy Signal)")
 
-# ---------------------------------------------------------
-                    # 2. SOFTWARE UPDATE (Adaptive FFT-Guided Narrowband)
+                    # ---------------------------------------------------------
+                    # 2. SOFTWARE UPDATE (Adaptive FFT-Guided Narrowband + Prediction)
                     # ---------------------------------------------------------
                     if self.current_rppg_bvp is not None:
                         bvp_array = self.current_rppg_bvp[self.proc.algo]
@@ -144,46 +157,45 @@ class ValidationPlotter:
                         sw_hrv_str = "--"
                         
                         if fs > 0 and len(display_bvp) > 15:
-                            # 1. Get the highly accurate baseline BPM from the FFT
                             fft_bpm = 70.0 
                             if self.proc.hr_estimate and self.proc.algo in self.proc.hr_estimate:
                                 fft_bpm = self.proc.hr_estimate[self.proc.algo]
                             
                             sw_bpm_str = f"{fft_bpm:.1f}"
 
-                            # 2. THE DEMO DAY MAGIC: Adaptive Narrowband Filter
-                            # We build a custom filter centered exactly on your current heartbeat
+                            # ADAPTIVE NARROWBAND FILTER
                             center_hz = fft_bpm / 60.0
-                            low_hz = max(0.5, center_hz - 0.5)   # Just below your heart rate
-                            high_hz = min(3.0, center_hz + 0.5)  # Just above your heart rate
+                            low_hz = max(0.5, center_hz - 0.01)
+                            high_hz = min(3.0, center_hz + 0.01)
                             
                             nyq = 0.5 * fs
                             if 0 < low_hz < high_hz < nyq:
                                 b, a = butter(3, [low_hz / nyq, high_hz / nyq], btype='bandpass')
-                                # Padding helps prevent the edges of the graph from flying out of control
                                 pad_len = min(15, len(display_bvp) - 1)
                                 display_bvp = filtfilt(b, a, display_bvp, padlen=pad_len)
                             
-                            # 3. Peak Prediction / Validation (Based on the Report's Logic)
-                            # Grab ALL candidate peaks, even the noisy ones
+                            # Standardize the wave AFTER filtering so prominence=0.05 works
+                            bvp_std = np.std(display_bvp)
+                            if bvp_std > 0:
+                                display_bvp = (display_bvp - np.mean(display_bvp)) / bvp_std
+                            
+                            # SMART PEAK PREDICTION / VALIDATION
                             candidates, _ = find_peaks(display_bvp, distance=int(0.3 * fs), prominence=0.05)
                             
                             if len(candidates) > 0 and fft_bpm > 40:
                                 expected_gap = int((60.0 / fft_bpm) * fs)
-                                validated_peaks = [candidates[0]] # Start with the first peak
+                                validated_peaks = [candidates[0]]
                                 
                                 for cand in candidates[1:]:
                                     last_peak = validated_peaks[-1]
                                     time_since_last = cand - last_peak
                                     
-                                    # ONLY accept the peak if it falls inside the expected prediction window (0.5x to 1.5x)
+                                    # Accept if inside expected window, OR accept to reset if we missed a beat entirely
                                     if 0.5 * expected_gap <= time_since_last <= 1.5 * expected_gap:
                                         validated_peaks.append(cand)
-                                    # If we completely missed a beat (noise blocked it), force a reset to keep tracking
                                     elif time_since_last > 1.5 * expected_gap:
                                         validated_peaks.append(cand)
 
-                                # Calculate HRV using only the mathematically validated peaks
                                 if len(validated_peaks) >= 2:
                                     rr_intervals = np.diff(validated_peaks) / fs
                                     if np.mean(rr_intervals) > 0:
@@ -216,22 +228,53 @@ class ValidationPlotter:
             print("\nShutting down validation system...")
             self.running = False
             self.cam.stop()
+            if hasattr(self.proc, 'imu') and self.proc.imu:
+                self.proc.imu.stop()
             cv2.destroyAllWindows()
             if self.ser: self.ser.close()
 
 if __name__ == "__main__":
-    print("--- Ground Truth Validation System ---")
-    print("Select rPPG Algorithm:")
+    print("--- Ground Truth Validation System (SMART LOCK) ---")
+    
+    # 1. Camera Selection
+    print("\nSelect video source:")
+    print("  A - Drone camera (XIAO ESP32)")
+    print("  B - PC webcam")
+    src_choice = input("Option [A/B]: ").strip().upper()
+
+    if src_choice == "B":
+        cam = WebcamHandler(index=0)
+        imu = None
+    else:
+        cam = CameraHandler(XIAO_IP)
+        imu = IMUHandler(XIAO_IP)
+
+    # 2. Algorithm Selection
+    print("\nSelect rPPG Algorithm:")
     print("  1 - GREEN (Verkruysse 2008)")
     print("  2 - OMIT  (Casado 2023)")
     print("  3 - POS   (Wang 2017)")
+    print("  4 - LMS   (adaptive; requires IMU/drone)")
     
-    choice = input("Option [1-3]: ").strip()
-    algo_map = {"1": "GREEN", "2": "OMIT", "3": "POS_WANG"}
-    selected_algo = algo_map.get(choice, "GREEN")
+    algo_choice = input("Option [1-4]: ").strip()
+    algo_map = {"1": "GREEN", "2": "OMIT", "3": "POS_WANG", "4": "LMS"}
+    selected_algo = algo_map.get(algo_choice, "GREEN")
     
-    print(f"\nStarting with Algorithm: {selected_algo}")
+    if selected_algo == "LMS" and imu is None:
+        print("Warning: LMS requires drone IMU. Falling back to GREEN.")
+        selected_algo = "GREEN"
+
+    # 3. ROI Selection
+    print("\nSelect ROI:")
+    print("  1 - Forehead       (4 landmarks — original)")
+    print("  2 - Full face      (36 landmarks — face oval)")
+    print("  3 - Multi-region   (face oval + 9x9 grid + DMRS; Face2PPG)")
+    roi_choice = input("Option [1-3]: ").strip()
+    roi_map = {"1": ROI_FOREHEAD, "2": ROI_FACE, "3": ROI_MULTI}
+    selected_roi = roi_map.get(roi_choice, ROI_FACE)
+
+    print(f"\nStarting with Algorithm: {selected_algo} | ROI: {selected_roi}")
     print("Waiting for camera and sensors to initialize...\n")
     
-    plotter = ValidationPlotter(SERIAL_PORT, BAUD_RATE, algo=selected_algo)
+    plotter = ValidationPlotter(SERIAL_PORT, BAUD_RATE, cam, imu, algo=selected_algo, roi=selected_roi)
     plotter.run()

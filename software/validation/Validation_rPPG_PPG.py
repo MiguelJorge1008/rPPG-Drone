@@ -7,6 +7,15 @@ import matplotlib.pyplot as plt
 from collections import deque
 from scipy.signal import find_peaks, butter, filtfilt
 import heartpy as hp
+import sys
+import os
+
+# --- PATH MAGIC ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(current_dir, '..'))
+sys.path.insert(0, parent_dir)
+
+# --- CORRECTED IMPORTS ---
 from DataHandler import WebcamHandler, CameraHandler, IMUHandler
 from Processor import FaceProcessor
 from ROIExtraction import ROI_FOREHEAD, ROI_FACE, ROI_MULTI
