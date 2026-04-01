@@ -23,20 +23,21 @@ Drone_rPPG/
 │   ├── Processor.py         # FaceProcessor: ROI, RGB extraction, real-time HR (rPPG)
 │   ├── RespiratoryProcessor.py  # RespiratoryProcessor: pose tracking, real-time RR
 │   ├── ROIExtraction.py     # ROI modes, face polygon, 9×9 grid, DMRS selection
-│   ├── evaluate.py          # Offline evaluation: MAE, RMSE, PCC from CSV
 │   ├── SOFTWARE.md          # Software technical documentation
 │   ├── algoritmos/
 │   │   ├── green.py         # GREEN algorithm (Verkruysse 2008)
 │   │   ├── omit.py          # OMIT algorithm (Face2PPG, Casado 2023)
 │   │   ├── pos_wang.py      # POS algorithm (Wang et al. 2017)
 │   │   └── adaptive_lms.py  # Adaptive LMS filter with IMU (motion cancellation)
-│   └── validation/
-│       ├── SensorIntegration.ino        # Arduino sketch: PPG + respiration sensors → Serial
-│       ├── PPG2csv.py                   # Record rPPG + hardware PPG simultaneously → CSV
-│       ├── Resp2csv.py                  # Record RR + hardware respiration sensor → CSV
-│       ├── Validation_rPPG_PPG.py       # Live rPPG vs hardware PPG comparison
-│       ├── Validation_Resp_Resp.py      # Live RR vs hardware respiration comparison
-│       └── Validation_rPPG_SMARTLOCK.py # rPPG vs SMARTLOCK reference device
+│   └── test/
+│       ├── PPG2csv.py       # Record rPPG + hardware PPG simultaneously → CSV
+│       ├── Resp2csv.py      # Record RR + hardware respiration sensor → CSV
+│       ├── PlotData.py      # Plot signals and metrics over time per recording
+│       ├── Evaluate.py      # Offline evaluation: MAE±SD, RMSE, Bias, PCC
+│       ├── RunTest.py       # Full pipeline: PlotData → Evaluate
+│       ├── Arduino/
+│       │   └── SensorIntegration.ino  # Arduino: PPG + resp sensors → Serial 115200
+│       └── data/            # CSV recordings
 │
 └── README.md
 ```
@@ -82,20 +83,19 @@ Developed in **Python 3.11** with OpenCV, MediaPipe and NumPy/SciPy.
 |--------|----------|
 | `main.py` | Selects mode (rPPG / Respiratory), source, algorithm, ROI and display mode at startup |
 | `DataHandler.py` | `CameraHandler` (MJPEG), `WebcamHandler` (webcam), `IMUHandler` (polling `/imu`) |
-| `Processor.py` | FaceMesh → ROI → RGB/frame → real-time HR (rPPG mode) |
+| `Processor.py` | FaceMesh → ROI → RGB/frame → real-time HR via power FFT (30 s window) |
 | `RespiratoryProcessor.py` | Bartula 2013: chest ROI → 1D profile cross-correlation → real-time RR |
 | `ROIExtraction.py` | ROI modes, polygon extraction, 9×9 grid, DMRS region selection |
-| `evaluate.py` | MAE / RMSE / PCC evaluation from a ground-truth CSV |
 | `algoritmos/green.py` | Direct green channel |
 | `algoritmos/omit.py` | QR decomposition, orthogonal subspace |
 | `algoritmos/pos_wang.py` | 1.6 s sliding window, POS projection |
 | `algoritmos/adaptive_lms.py` | Adaptive NLMS with IMU as noise reference (drone only) |
-| `validation/PPG2csv.py` | Simultaneous rPPG + hardware PPG recording → CSV |
-| `validation/Resp2csv.py` | Simultaneous RR + hardware respiration sensor recording → CSV |
-| `validation/Validation_rPPG_PPG.py` | Live comparison of rPPG vs hardware PPG reference |
-| `validation/Validation_Resp_Resp.py` | Live comparison of RR vs hardware respiration reference |
-| `validation/Validation_rPPG_SMARTLOCK.py` | rPPG vs SMARTLOCK reference device |
-| `validation/SensorIntegration.ino` | Arduino sketch: reads PPG + respiration sensors, streams over Serial at 115200 baud |
+| `test/PPG2csv.py` | Simultaneous rPPG + hardware PPG recording → CSV |
+| `test/Resp2csv.py` | Simultaneous RR + hardware respiration sensor recording → CSV |
+| `test/PlotData.py` | Plot signals and metrics over time per recording (PNG per CSV) |
+| `test/Evaluate.py` | MAE±SD / RMSE / Bias / PCC from stored GT + algo columns |
+| `test/RunTest.py` | Full pipeline: PlotData → Evaluate |
+| `test/Arduino/SensorIntegration.ino` | Arduino: reads PPG + respiration sensors, streams over Serial at 115200 baud |
 
 ### ROI Modes
 
@@ -123,16 +123,33 @@ Press `q` to stop.
 
 | Mode | Measures | Method |
 |------|----------|--------|
-| **rPPG** | Heart rate (BPM) | FaceMesh → face ROI → colour signal |
-| **Respiratory** | Breathing rate (rpm) | Bartula 2013 — chest ROI cross-correlation, no landmarks |
+| **rPPG** | Heart rate (BPM) | FaceMesh → face ROI → colour signal → power FFT |
+| **Respiratory** | Breathing rate (RPM) | Bartula 2013 — chest ROI cross-correlation, no landmarks |
 
-### Evaluate
+### Record and Evaluate
 
 ```bash
-python evaluate.py results.csv --plot --save
+# From software/test/
+python PPG2csv.py    # rPPG + hardware PPG → data/Recording_rPPG_*.csv
+python Resp2csv.py   # RR  + hardware resp → data/Recording_Resp_*.csv
+
+# Run full evaluation pipeline
+python RunTest.py
 ```
 
-Expects a CSV with columns `HR_gt`, `HR_GREEN`, `HR_OMIT`, `HR_POS_WANG`, `HR_LMS`, `roi_mode`, `source`. Outputs MAE / RMSE / PCC tables per algorithm and condition.
+`Evaluate.py` reads `HR_gt` / `RR_gt` directly from each CSV (computed during recording with a 30 s backward window — same method as the processor) and outputs:
+
+```
+Table 1 — Standard algorithms      MAE±SD    RMSE    BIAS    PCC
+  GREEN  (no IMU)
+  OMIT
+  POS_WANG
+  BARTULA (respiration)
+
+Table 2 — IMU / Motion compensation
+  GREEN  (IMU recordings)
+  LMS
+```
 
 ## How It Works
 
@@ -154,7 +171,7 @@ MPU-6050        ──→  IMUHandler     ──┘
                                          │
                               Detrend + Butterworth [0.75–4 Hz]
                                          │
-                                    FFT → BPM
+                               Power FFT → BPM (30 s window)
 ```
 
 **Respiratory mode (breathing rate) — Bartula et al. 2013:**
@@ -183,10 +200,10 @@ OV3660 (MJPEG)  ──→  CameraHandler  ──→  RespiratoryProcessor
                                          │
                            Detrend + Butterworth [0.1–0.5 Hz]
                                          │
-                           Peak detection → breath-by-breath validation
+                           find_peaks → breath-by-breath validation
                            (exclude motion segments, invalid durations)
                                          │
-                           Median inter-breath interval → rpm
+                           Median inter-breath interval → RPM
 ```
 
 See [FIRMWARE.md](firmware/FIRMWARE.md) and [SOFTWARE.md](software/SOFTWARE.md) for detailed documentation.

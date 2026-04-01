@@ -13,19 +13,20 @@ software/
 ├── Processor.py                 # FaceProcessor: ROI, RGB extraction, real-time HR (rPPG)
 ├── RespiratoryProcessor.py      # RespiratoryProcessor: pose tracking, real-time RR
 ├── ROIExtraction.py             # ROI modes, face polygon, grid extraction, DMRS
-├── evaluate.py                  # Offline evaluation: MAE, RMSE, PCC from CSV
 ├── algoritmos/
 │   ├── green.py                 # GREEN algorithm (Verkruysse 2008)
-│   ├── omit.py                  # OMIT algorithm (Casado & López 2023)
+│   ├── omit.py                  # OMIT algorithm (Casado 2023)
 │   ├── pos_wang.py              # POS algorithm (Wang et al. 2017)
 │   └── adaptive_lms.py          # Adaptive NLMS filter with IMU (drone only)
-└── validation/
-    ├── SensorIntegration.ino        # Arduino: PPG + respiration sensors → Serial (115200 baud)
-    ├── PPG2csv.py                   # Record rPPG + hardware PPG simultaneously → CSV
-    ├── Resp2csv.py                  # Record RR + hardware respiration sensor → CSV
-    ├── Validation_rPPG_PPG.py       # Live rPPG vs hardware PPG comparison
-    ├── Validation_Resp_Resp.py      # Live RR vs hardware respiration comparison
-    └── Validation_rPPG_SMARTLOCK.py # rPPG vs SMARTLOCK reference device
+└── test/
+    ├── PPG2csv.py               # Record rPPG + hardware PPG simultaneously → CSV
+    ├── Resp2csv.py              # Record RR + hardware respiration sensor → CSV
+    ├── PlotData.py              # Plot signals and metrics over time per recording
+    ├── Evaluate.py              # Offline evaluation: MAE, RMSE, Bias, PCC from CSV
+    ├── RunTest.py               # Runs the full pipeline: PlotData → Evaluate
+    ├── Arduino/
+    │   └── SensorIntegration.ino    # Arduino: PPG + respiration sensors → Serial (115200 baud)
+    └── data/                    # CSV recordings (output of PPG2csv / Resp2csv)
 ```
 
 ---
@@ -58,7 +59,7 @@ Entry point. Prompts the user for the operating mode, display preference, video 
 | Step | Options | Description |
 |------|---------|-------------|
 | Mode | `1` rPPG · `2` Respiratory | `FaceProcessor` or `RespiratoryProcessor` |
-| Display | `1` Sim · `2` Não | Show matplotlib graphs + camera window, or terminal only |
+| Display | `1` Yes · `2` No | Show matplotlib graphs + camera window, or terminal only |
 | Source | `A` Drone · `B` Webcam | MJPEG stream or local webcam |
 | Algorithm | `1`–`4` *(rPPG only)* | GREEN, OMIT, POS_WANG, LMS |
 | ROI | `1`–`3` *(rPPG only)* | FOREHEAD, FACE, MULTI |
@@ -136,13 +137,13 @@ All ROI logic: landmark indices, polygon extraction, grid extraction and DMRS re
 | `draw_grid_overlay(frame, poly, h, w, selected_indices)` | Draws grid on frame; selected regions shown in green |
 | `compute_kfd(signal)` | Katz Fractal Dimension — measures signal complexity |
 | `compute_dfa(signal)` | Detrended Fluctuation Analysis — measures long-range correlations |
-| `dmrs_select(region_signals, fs, r_max, kfd_thresh)` | Dynamic Multi-Region Selection: variance → KFD → spectral energy ranking |
+| `dmrs_select(region_signals, fs, r_max, kfd_thresh)` | Dynamic Multi-Region Selection: variance → KFD → spectral SNR ranking |
 
 **DMRS pipeline (Face2PPG, Casado & López 2023):**
 
 1. Discard regions with zero variance
 2. KFD filter: keep regions with `KFD_i / KFD_global >= 0.85`
-3. Rank by spectral energy in HR band [0.75–4.0 Hz] → top `R_MAX=32` regions
+3. Rank by SNR in HR band [0.75–4.0 Hz] → top `R_MAX=32` regions
 
 > DFA omitted from real-time DMRS for performance. DMRS runs in a background thread every 90 frames; HR estimation uses the cached selected regions every 30 frames.
 
@@ -168,7 +169,7 @@ Processes frames with MediaPipe FaceMesh, extracts the RGB signal, runs rPPG alg
 | `process_frame(frame)` | Resizes to 320×240, runs FaceMesh, extracts ROI RGB, draws overlay |
 | `get_fps(window=60)` | Estimates FPS from real timestamps; fallback 27.0 Hz |
 | `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] |
-| `estimate_hr(bvp, fs)` | FFT peak in [0.75–4.0 Hz] → BPM |
+| `estimate_hr(bvp, fs)` | Power FFT peak in [0.75–4.0 Hz] → BPM (no filtering, no windowing) |
 | `_estimate_hr_realtime()` | Computes BVP + HR on signal window; uses DMRS regions if ROI_MULTI |
 | `_compute_hr_background()` | Background thread: HR every 30 frames |
 | `_compute_dmrs_background()` | Background thread: DMRS region selection every 90 frames (ROI_MULTI only) |
@@ -186,7 +187,7 @@ Processes frames with MediaPipe FaceMesh, extracts the RGB signal, runs rPPG alg
 
 **HR estimation (`estimate_hr`):**
 
-FFT over the filtered BVP signal; peak frequency in [0.75–4.0 Hz] converted to BPM.
+Power FFT over the filtered BVP signal; argmax frequency in [0.75–4.0 Hz] → BPM. No Hanning window, no additional filtering.
 
 **Background thread triggers:**
 
@@ -272,77 +273,82 @@ Frame ROI (grayscale)
 
 ---
 
-### `validation/`
+### `test/`
 
-Hardware-synchronized validation scripts. All scripts read a hardware reference sensor via Serial (Arduino at 115200 baud, `COM5`) and synchronize it with the software pipeline in real time.
+Hardware-synchronized recording and evaluation scripts. All recording scripts read a hardware reference sensor via Serial (Arduino at 115200 baud, `COM3`) and synchronize it with the software pipeline in real time.
 
-**`SensorIntegration.ino`** — Arduino sketch that reads an analog PPG sensor (pin `A6`) and a respiration sensor (pin `A5`) and streams timestamped samples over Serial at 115200 baud.
+**`Arduino/SensorIntegration.ino`** — Arduino sketch that reads an analog PPG sensor (pin `A6`) and a respiration sensor (pin `A5`) and streams timestamped samples over Serial at 115200 baud.
 
 ---
 
-**`PPG2csv.py`** — Records rPPG and hardware PPG simultaneously and saves to CSV for offline evaluation.
+**`PPG2csv.py`** — Records rPPG and hardware PPG simultaneously and saves to CSV.
 
-- Reads hardware PPG from Serial while running `FaceProcessor`
-- Saves synchronized timestamps, hardware PPG raw values and rPPG HR estimates
-- Plots both signals in real time
+- **Warmup:** 60 s (no data saved); **Recording:** 60 s
+- Per frame, saves: `timestamp`, `signal_hw` (last Arduino PPG sample), `signal_sw` (last BVP value), `HR_gt`, `HR_<algo>`, `SDNN_gt`, `SDNN_<algo>`, `RMSSD_gt`, `RMSSD_<algo>`
+- **`HR_gt` computation:** 30 s backward-looking window on `signal_hw`, power FFT (no filtering), band [0.75–4.0 Hz], argmax → BPM. Identical to `Processor.estimate_hr`.
+- SDNN / RMSSD computed from `find_peaks` on the hardware signal (distance = 0.4 s)
 
 **`Resp2csv.py`** — Records respiratory rate and hardware respiration sensor simultaneously and saves to CSV.
 
-- Reads hardware respiration signal from Serial while running `RespiratoryProcessor`
-- Saves synchronized timestamps and RR estimates
+- **Warmup:** 30 s; **Recording:** 60 s
+- Per frame, saves: `timestamp`, `signal_hw` (last Arduino respiration sample), `signal_sw` (filtered camera signal), `RR_gt`, `RR_BARTULA`, `BRV_gt`, `BRV_BARTULA`
+- **`RR_gt` computation:** 30 s backward-looking window on `signal_hw`, `find_peaks` (no filtering, distance = 1.5 s, prominence = 0.25 × std), valid intervals [1.5–10 s], median → RPM. Identical to `RespiratoryProcessor._estimate_rr_from_peaks`.
 
 ---
 
-**`Validation_rPPG_PPG.py`** — Live side-by-side comparison of rPPG vs hardware PPG reference.
+**`PlotData.py`** — Generates one PNG per CSV with 3 rows: raw signals (z-score normalised), rate over time (HR or RR), and variability over time (SDNN/RMSSD or BRV).
 
-- Runs `FaceProcessor` and reads hardware PPG from Serial in parallel
-- Displays both BVP signals and HR estimates in real time
+```bash
+python PlotData.py               # all recordings in data/
+python PlotData.py --file X.csv  # single file
+```
 
-**`Validation_Resp_Resp.py`** — Live comparison of software RR vs hardware respiration sensor.
-
-- Runs `RespiratoryProcessor` and reads hardware respiration from Serial in parallel
-- Displays both position signals and RR estimates side by side
-
-**`Validation_rPPG_SMARTLOCK.py`** — Compares rPPG HR estimates against a SMARTLOCK medical reference device via Serial.
+Output: `results/plots_raw/`
 
 ---
 
-**Common configuration** (top of each validation script):
+**`Evaluate.py`** — Offline evaluation. Reads `HR_gt` + `HR_<algo>` (or `RR_gt` + `RR_BARTULA`) directly from each CSV and computes metrics on all valid (non-NaN) pairs.
+
+```bash
+python Evaluate.py               # all recordings in data/
+python Evaluate.py --file X.csv  # single file
+```
+
+**Metrics:** MAE ± SD, RMSE, Bias, PCC — matching Face2PPG Table I format.
+
+**Output — two tables:**
+
+| Table | Algorithms |
+|-------|-----------|
+| Table 1 — Standard | GREEN (no IMU), OMIT, POS_WANG, BARTULA |
+| Table 2 — IMU / Motion comp | GREEN (IMU recordings), LMS |
+
+IMU recordings are detected automatically from the filename (contains `imu`).
+
+**No GT recomputation** — ground truth values are read directly from the CSV columns produced by `PPG2csv.py` / `Resp2csv.py`. This guarantees GT and algo estimates use the same computation method (both use 30 s backward windows).
+
+Output: `results/csv_raw/summary_metrics.csv`
+
+---
+
+**`RunTest.py`** — Runs the full pipeline in order:
+
+```bash
+python RunTest.py
+```
+
+1. `PlotData.py --source raw` → `results/plots_raw/`
+2. `Evaluate.py` → prints metrics table + `results/csv_raw/summary_metrics.csv`
+
+---
+
+**Common configuration** (top of each recording script):
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `SERIAL_PORT` | `COM5` | Serial port of the Arduino |
+| `SERIAL_PORT` | `COM3` | Serial port of the Arduino |
 | `BAUD_RATE` | `115200` | Must match `SensorIntegration.ino` |
 | `XIAO_IP` | `http://192.168.4.1` | Drone IP (ignored when using webcam) |
-
----
-
-### `evaluate.py`
-
-Offline evaluation script. Reads a results CSV and computes MAE, RMSE and PCC per algorithm, with optional breakdown by ROI mode and source.
-
-**Expected CSV columns:**
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `timestamp` | float | Time of measurement |
-| `HR_gt` | float | Ground truth HR in BPM (oximeter) |
-| `HR_GREEN` | float | Estimated HR — GREEN (optional) |
-| `HR_OMIT` | float | Estimated HR — OMIT (optional) |
-| `HR_POS_WANG` | float | Estimated HR — POS_WANG (optional) |
-| `HR_LMS` | float | Estimated HR — LMS (optional) |
-| `roi_mode` | str | FOREHEAD / FACE / MULTI (optional) |
-| `source` | str | drone / webcam (optional) |
-
-**Usage:**
-
-```bash
-python evaluate.py results.csv           # MAE / RMSE / PCC tables
-python evaluate.py results.csv --plot    # + scatter plots per algorithm
-python evaluate.py results.csv --save    # + save metrics to results_metrics.csv
-```
-
-**Output:** tables with MAE (BPM), RMSE (BPM) and PCC broken down by algorithm, ROI mode and source — equivalent to Face2PPG Table I format.
 
 ---
 
@@ -408,7 +414,7 @@ error[n] = green[n] - w·x[n]
 w += (μ / (||x||² + ε)) × error × x   # NLMS weight update
 ```
 
-**Parameters:** `μ=0.01`, `ε=1e-6`. Drone mode only.
+**Parameters:** `μ=0.1`, `ε=1e-3`. Drone mode only.
 
 ---
 
@@ -448,10 +454,15 @@ The program prompts:
 
 Press `q` to stop.
 
-### Evaluate results
+### Record and evaluate
 
 ```bash
-python evaluate.py results.csv --plot --save
+# Record (run from test/)
+python PPG2csv.py    # rPPG + hardware PPG → data/Recording_rPPG_*.csv
+python Resp2csv.py   # RR  + hardware resp → data/Recording_Resp_*.csv
+
+# Evaluate all recordings
+python RunTest.py
 ```
 
 ---
@@ -465,12 +476,14 @@ python evaluate.py results.csv --plot --save
 - [x] Grid overlay visualisation in camera window
 - [x] GREEN, OMIT, POS_WANG and LMS algorithms
 - [x] Filters: detrend + Butterworth bandpass [0.75–4.0 Hz]
-- [x] Real-time HR via FFT (every 30 frames)
+- [x] Real-time HR via power FFT (every 30 frames, 30 s window)
 - [x] LMS motion artifact cancellation with IMU
-- [x] Evaluation script: MAE / RMSE / PCC from CSV
 - [x] Respiratory rate via MediaPipe Pose (thorax movement, 0.1–0.5 Hz)
 - [x] Display toggle: full visual mode vs terminal-only (improved FPS)
-- [x] Hardware-synchronized validation scripts (PPG, respiration, SMARTLOCK)
+- [x] Hardware-synchronized recording scripts (PPG2csv, Resp2csv)
+- [x] Signal plot script (PlotData) — z-normalised signals + rate + variability over time
+- [x] Evaluation script (Evaluate) — MAE±SD, RMSE, Bias, PCC; two aggregate tables
+- [x] GT computation aligned with processor: 30 s backward window, power FFT (HR) / find_peaks (RR)
 - [ ] Peak detection → RR intervals → HRV (SDNN, RMSSD, LF, HF, LF/HF)
 - [ ] IMU-based motion compensation for GREEN / OMIT / POS
 - [ ] Clinical validation against oximeter ground truth
