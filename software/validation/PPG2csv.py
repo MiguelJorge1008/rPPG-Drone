@@ -20,21 +20,23 @@ from Processor import FaceProcessor
 from ROIExtraction import ROI_FOREHEAD, ROI_FACE, ROI_MULTI
 
 # --- CONFIGURATION ---
-SERIAL_PORT = 'COM5'  
+SERIAL_PORT = 'COM3'  
 BAUD_RATE = 115200
-WINDOW_SIZE = 400     
-BUFFER_UPDATE = 5     
+DISPLAY_SECS  = 15    # time window shown in both plots (seconds)
+WINDOW_SIZE   = 2000  # max hardware samples kept in memory
+BUFFER_UPDATE = 5
 XIAO_IP = "http://192.168.4.1"
 
 class RecordPlotter:
-    def __init__(self, port, baud, cam, cam_choice, imu=None, algo="GREEN", roi=ROI_FACE):
-        self.hw_time = [] 
+    def __init__(self, port, baud, cam, cam_choice, imu=None, algo="GREEN", roi=ROI_FACE, display=True):
+        self.hw_time = []
         self.hw_ppg = []
-        self.csv_rows = [] 
-        
+        self.csv_rows = []
+
         self.cam_choice = cam_choice
-        self.serial_lock = threading.Lock() 
-        
+        self.display = display
+        self.serial_lock = threading.Lock()
+
         try:
             self.ser = serial.Serial(port, baud, timeout=0.1)
             print(f"Connected to Arduino on {port}")
@@ -44,31 +46,33 @@ class RecordPlotter:
 
         self.cam = cam
         self.proc = FaceProcessor(self.cam, imu=imu, algo=algo, roi=roi)
-        
-        plt.ion()
-        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        self.fig.suptitle(f'Data Collection: Hardware PPG vs Camera rPPG ({algo} | {roi})', fontsize=16)
-        
-        self.line_hw, = self.ax1.plot([], [], 'r-', label='Hardware PPG', lw=2)
-        self.line_sw, = self.ax2.plot([], [], 'g-', label=f'rPPG ({algo})', lw=2)
-        
-        self.ax1.set_title("Arduino Ground Truth (Live Stream)")
-        self.ax2.set_title("Camera Estimation (Block Updated)")
-        
-        for ax in [self.ax1, self.ax2]:
-            ax.set_xlim(0, WINDOW_SIZE)
-            ax.grid(True, alpha=0.3)
-            ax.legend(loc="upper right")
 
-        bbox_props = dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.9)
-        self.txt_hw = self.ax1.text(0.02, 0.90, 'Gathering Data...', transform=self.ax1.transAxes, 
-                                    fontsize=12, fontweight='bold', color='darkred', zorder=10, bbox=bbox_props)
-        self.txt_sw = self.ax2.text(0.02, 0.90, 'Waiting for buffer...', transform=self.ax2.transAxes, 
-                                    fontsize=12, fontweight='bold', color='darkgreen', zorder=10, bbox=bbox_props)
+        if self.display:
+            plt.ion()
+            self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(14, 6))
+            self.fig.suptitle(f'Data Collection: Hardware PPG vs Camera rPPG ({algo} | {roi})', fontsize=16)
 
-        self.phase_text = self.fig.text(0.5, 0.05, 'INITIALIZING...', ha='center', va='center', 
-                                        fontsize=16, fontweight='bold', color='white', 
-                                        bbox=dict(facecolor='black', pad=5, alpha=0.9))
+            self.line_hw, = self.ax1.plot([], [], 'r-', label='Hardware PPG', lw=2)
+            self.line_sw, = self.ax2.plot([], [], 'g-', label=f'rPPG ({algo})', lw=2)
+
+            self.ax1.set_title("Arduino Ground Truth (Live Stream)")
+            self.ax2.set_title("Camera Estimation (Block Updated)")
+
+            for ax in [self.ax1, self.ax2]:
+                ax.set_xlim(0, DISPLAY_SECS)
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc="upper right")
+                ax.set_xlabel("Time (s)")
+
+            bbox_props = dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.9)
+            self.txt_hw = self.ax1.text(0.02, 0.90, 'Gathering Data...', transform=self.ax1.transAxes,
+                                        fontsize=12, fontweight='bold', color='darkred', zorder=10, bbox=bbox_props)
+            self.txt_sw = self.ax2.text(0.02, 0.90, 'Waiting for buffer...', transform=self.ax2.transAxes,
+                                        fontsize=12, fontweight='bold', color='darkgreen', zorder=10, bbox=bbox_props)
+
+            self.phase_text = self.fig.text(0.5, 0.05, 'INITIALIZING...', ha='center', va='center',
+                                            fontsize=16, fontweight='bold', color='white',
+                                            bbox=dict(facecolor='black', pad=5, alpha=0.9))
 
         self.running = True
         self.serial_thread = threading.Thread(target=self.read_serial, daemon=True)
@@ -105,11 +109,17 @@ class RecordPlotter:
             while self.running:
                 elapsed = time.time() - self.start_time
                 if elapsed < 60:
-                    self.phase_text.set_text(f'WARMUP: {60 - int(elapsed)}s remaining (No data saved)')
-                    self.phase_text.get_bbox_patch().set_facecolor('orange')
+                    if self.display:
+                        self.phase_text.set_text(f'WARMUP: {60 - int(elapsed)}s remaining (No data saved)')
+                        self.phase_text.get_bbox_patch().set_facecolor('orange')
+                    else:
+                        print(f'\rWARMUP: {60 - int(elapsed)}s remaining (No data saved)', end='', flush=True)
                 elif elapsed < 120:
-                    self.phase_text.set_text(f'🔴 RECORDING: {120 - int(elapsed)}s remaining')
-                    self.phase_text.get_bbox_patch().set_facecolor('red')
+                    if self.display:
+                        self.phase_text.set_text(f'RECORDING: {120 - int(elapsed)}s remaining')
+                        self.phase_text.get_bbox_patch().set_facecolor('red')
+                    else:
+                        print(f'\rRECORDING: {120 - int(elapsed)}s remaining', end='', flush=True)
                 else:
                     print("\nRecording complete! Generating CSV...")
                     self.running = False
@@ -117,7 +127,13 @@ class RecordPlotter:
 
                 frame = self.cam.get_frame()
                 if frame is None: continue
-                
+
+                if self.proc.imu is not None:
+                    sample = self.proc.imu.get_imu()
+                    if sample is not None and id(sample) != self.proc._last_imu_id:
+                        self.proc.imu_signal.append(sample)
+                        self.proc._last_imu_id = id(sample)
+
                 annotated = self.proc.process_frame(frame)
                 
                 if len(self.proc.rgb_signal) % 30 == 0 and len(self.proc.rgb_signal) > 0:
@@ -129,59 +145,70 @@ class RecordPlotter:
 
                 frame_count += 1
                 if frame_count % BUFFER_UPDATE == 0:
-                    
+
                     with self.serial_lock:
-                        hw_t_list = list(self.hw_time)[-WINDOW_SIZE:] 
+                        hw_t_list = list(self.hw_time)[-WINDOW_SIZE:]
                         hw_p_list = list(self.hw_ppg)[-WINDOW_SIZE:]
-                    
+
                     min_len = min(len(hw_t_list), len(hw_p_list))
-                    
-                    # 1. HARDWARE UPDATE 
+
+                    # 1. HARDWARE — filter to last DISPLAY_SECS, use time x-axis
                     if min_len > 100:
                         hw_t_arr = np.array(hw_t_list[:min_len])
                         hw_p_arr = np.array(hw_p_list[:min_len])
-                        
-                        self.line_hw.set_ydata(hw_p_arr)
-                        self.line_hw.set_xdata(np.arange(len(hw_p_arr)))
-                        y_min, y_max = np.min(hw_p_arr), np.max(hw_p_arr)
-                        margin = (y_max - y_min) * 0.1 if y_max != y_min else 1
-                        self.ax1.set_ylim(y_min - margin, y_max + margin)
 
-                        hw_peaks, _ = find_peaks(hw_p_arr, distance=15, prominence=0.05)
-                        if len(hw_peaks) >= 3: # Need at least 3 peaks to get 2 intervals for RMSSD
-                            rr_intervals = np.diff(hw_t_arr[hw_peaks])
+                        # keep only last DISPLAY_SECS seconds for display
+                        t_cutoff = hw_t_arr[-1] - DISPLAY_SECS
+                        mask = hw_t_arr >= t_cutoff
+                        hw_t_disp = hw_t_arr[mask] - hw_t_arr[mask][0] if mask.any() else hw_t_arr
+                        hw_p_disp = hw_p_arr[mask]
+
+                        if self.display:
+                            self.line_hw.set_xdata(hw_t_disp)
+                            self.line_hw.set_ydata(hw_p_disp)
+                            self.ax1.set_xlim(0, DISPLAY_SECS)
+                            y_min, y_max = np.min(hw_p_disp), np.max(hw_p_disp)
+                            margin = (y_max - y_min) * 0.1 if y_max != y_min else 1
+                            self.ax1.set_ylim(y_min - margin, y_max + margin)
+
+                        # use same DISPLAY_SECS window for BPM (consistent with software)
+                        hw_t_calc = hw_t_arr[mask]
+                        hw_p_calc = hw_p_arr[mask]
+                        hw_peaks, _ = find_peaks(hw_p_calc, distance=15, prominence=0.05)
+                        if len(hw_peaks) >= 3:  # Need at least 3 peaks to get 2 intervals for RMSSD
+                            rr_intervals = np.diff(hw_t_calc[hw_peaks])
                             rr_intervals = rr_intervals[(rr_intervals > 0.3) & (rr_intervals < 1.5)]
 
                             if len(rr_intervals) >= 2:
                                 median_rr = np.median(rr_intervals)
                                 mad = np.median(np.abs(rr_intervals - median_rr))
                                 rr_intervals = rr_intervals[np.abs(rr_intervals - median_rr) < 3 * mad]
-                                
+
                                 if len(rr_intervals) >= 2:
                                     current_hw_bpm = 60.0 / np.mean(rr_intervals)
                                     current_hw_sdnn = np.std(rr_intervals) * 1000
-                                    # RMSSD Math
                                     current_hw_rmssd = np.sqrt(np.mean(np.diff(rr_intervals)**2)) * 1000
-                                    self.txt_hw.set_text(f"BPM: {current_hw_bpm:.1f} | SDNN: {current_hw_sdnn:.0f} | RMSSD: {current_hw_rmssd:.0f}")
+                                    if self.display:
+                                        self.txt_hw.set_text(f"BPM: {current_hw_bpm:.1f} | SDNN: {current_hw_sdnn:.0f} | RMSSD: {current_hw_rmssd:.0f}")
 
-                    # 2. SOFTWARE UPDATE 
+                    # 2. SOFTWARE — use time x-axis aligned to DISPLAY_SECS
                     with self.proc._hr_lock:
                         bvp_dict = self.proc._latest_bvps
-                        
+
                     if bvp_dict is not None and self.proc.algo in bvp_dict:
                         bvp_array = bvp_dict[self.proc.algo]
-                        display_bvp = bvp_array[-WINDOW_SIZE:] if len(bvp_array) > WINDOW_SIZE else bvp_array
-                        
+                        fs = self.proc.get_fps()
+                        sw_n = int(DISPLAY_SECS * fs)
+                        display_bvp = bvp_array[-sw_n:] if len(bvp_array) > sw_n else bvp_array
+
                         if len(display_bvp) > 15:
-                            fs = self.proc.get_fps()
                             if self.proc.hr_estimate and self.proc.algo in self.proc.hr_estimate:
                                 current_sw_bpm = self.proc.hr_estimate[self.proc.algo]
-                                
+
                             bvp_std = np.std(display_bvp)
                             if bvp_std > 0:
                                 display_bvp = (display_bvp - np.mean(display_bvp)) / bvp_std
-                                
-                            # Re-add broad peak finder for live Software HRV & RMSSD
+
                             dist = max(1, int(0.3 * fs))
                             sw_peaks, _ = find_peaks(display_bvp, distance=dist, prominence=0.1)
                             if len(sw_peaks) >= 3:
@@ -190,20 +217,24 @@ class RecordPlotter:
                                 if len(rr_sw) >= 2:
                                     current_sw_sdnn = np.std(rr_sw) * 1000
                                     current_sw_rmssd = np.sqrt(np.mean(np.diff(rr_sw)**2)) * 1000
-                                    
-                            self.txt_sw.set_text(f"BPM: {current_sw_bpm:.1f} | SDNN: {current_sw_sdnn:.0f} | RMSSD: {current_sw_rmssd:.0f}")
 
-                        self.line_sw.set_ydata(display_bvp)
-                        self.line_sw.set_xdata(np.arange(len(display_bvp)))
-                        self.ax2.set_xlim(0, max(len(display_bvp), 1))
-                        
-                        if len(display_bvp) > 10:
-                            y_min, y_max = np.min(display_bvp), np.max(display_bvp)
-                            margin = (y_max - y_min) * 0.1 if y_max != y_min else 1
-                            self.ax2.set_ylim(y_min - margin, y_max + margin)
+                            if self.display:
+                                self.txt_sw.set_text(f"BPM: {current_sw_bpm:.1f} | SDNN: {current_sw_sdnn:.0f} | RMSSD: {current_sw_rmssd:.0f}")
 
-                    self.fig.canvas.draw()
-                    self.fig.canvas.flush_events()
+                        if self.display:
+                            sw_t = np.arange(len(display_bvp)) / fs
+                            self.line_sw.set_xdata(sw_t)
+                            self.line_sw.set_ydata(display_bvp)
+                            self.ax2.set_xlim(0, DISPLAY_SECS)
+
+                            if len(display_bvp) > 10:
+                                y_min, y_max = np.min(display_bvp), np.max(display_bvp)
+                                margin = (y_max - y_min) * 0.1 if y_max != y_min else 1
+                                self.ax2.set_ylim(y_min - margin, y_max + margin)
+
+                    if self.display:
+                        self.fig.canvas.draw()
+                        self.fig.canvas.flush_events()
 
                 # --- LIVE RECORDING LOGIC ---
                 if 60 <= elapsed <= 120:
@@ -232,7 +263,8 @@ class RecordPlotter:
                         'source': "webcam" if self.cam_choice == "B" else "drone"
                     })
 
-                cv2.imshow("Recording Feed (Face Detection)", annotated)
+                if self.display:
+                    cv2.imshow("Recording Feed (Face Detection)", annotated)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("Recording manually aborted!")
                     break
@@ -247,13 +279,21 @@ class RecordPlotter:
             if len(self.csv_rows) > 0:
                 df = pd.DataFrame(self.csv_rows)
                 filename = f"Recording_rPPG_{self.proc.algo}_{int(time.time())}.csv"
-                df.to_csv(f"recordings/{filename}", index=False)
-                print(f"✅ Success! Saved {len(df)} live frames to {filename}")
+                recordings_dir = os.path.join(current_dir, "recordings")
+                os.makedirs(recordings_dir, exist_ok=True)
+                filepath = os.path.join(recordings_dir, filename)
+                df.to_csv(filepath, index=False)
+                print(f"Saved {len(df)} live frames to {filepath}")
 
 
 if __name__ == "__main__":
     print("--- rPPG Data Collection System ---")
-    
+
+    print("\nShow graphs and camera window?")
+    print("  1 - Yes (graphs + camera)")
+    print("  2 - No  (terminal only)")
+    display = input("Option [1/2]: ").strip() != "2"
+
     print("\nSelect video source:")
     print("  A - Drone camera (XIAO ESP32)")
     print("  B - PC webcam")
@@ -291,5 +331,5 @@ if __name__ == "__main__":
     print(f"\nStarting with Algorithm: {selected_algo} | ROI: {selected_roi}")
     print("Get ready! The 60-second warmup will start automatically.")
     
-    plotter = RecordPlotter(SERIAL_PORT, BAUD_RATE, cam, src_choice, imu, algo=selected_algo, roi=selected_roi)
+    plotter = RecordPlotter(SERIAL_PORT, BAUD_RATE, cam, src_choice, imu, algo=selected_algo, roi=selected_roi, display=display)
     plotter.run()
