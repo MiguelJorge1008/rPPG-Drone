@@ -290,30 +290,35 @@ def _agg_row(label, unit, rows):
         mae=valid['mae'].mean(), mae_sd=valid['mae_sd'].mean(),
         rmse=valid['rmse'].mean(), bias=valid['bias'].mean(),
         r=valid['r'].mean(),
+        snr_mean=rows.dropna(subset=['snr_mean'])['snr_mean'].mean() if 'snr_mean' in rows.columns and not rows.dropna(subset=['snr_mean']).empty else np.nan,
+        accuracy_pct=rows.dropna(subset=['accuracy_pct'])['accuracy_pct'].mean() if 'accuracy_pct' in rows.columns and not rows.dropna(subset=['accuracy_pct']).empty else np.nan,
     )
 
 
 def _print_agg_table(title, rows):
-    W = 80
+    W = 105
     print(f"\n{title}")
     print("-" * W)
-    print(f"  {'ALGO':<14} {'N files':>7}  {'MAE±SD':>14}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}")
+    print(f"  {'ALGO':<14} {'N files':>7}  {'MAE±SD':>14}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}  {'SNR':>8}  {'Acc%':>6}")
     print("-" * W)
     for row in rows:
         if row is None:
             continue
         unit = row['unit']
+        snr_s = f"{row['snr_mean']:.2f}dB" if pd.notna(row.get('snr_mean')) else "N/A"
+        acc_s = f"{row['accuracy_pct']:.1f}%" if pd.notna(row.get('accuracy_pct')) else "N/A"
         print(f"  {row['label']:<14} {row['n_files']:>7}  "
-              f"{row['mae']:.2f}±{row['mae_sd']:.2f}{unit[:3]:>3}  "
-              f"{row['rmse']:>6.2f}  {row['bias']:>+7.2f}  {row['r']:>6.3f}")
+              f"{row['mae']:.2f}\u00b1{row['mae_sd']:.2f}{unit[:3]:>3}  "
+              f"{row['rmse']:>6.2f}  {row['bias']:>+7.2f}  {row['r']:>6.3f}  "
+              f"{snr_s:>8}  {acc_s:>6}")
     print("-" * W)
 
 
 def print_summary(all_results):
-    print("\n" + "=" * 105)
+    print("\n" + "=" * 125)
     print(f"{'FILE':<45} {'ALGO':<12} {'M':<3} {'N':>5}  "
-          f"{'MAE±SD':>16}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}")
-    print("=" * 105)
+          f"{'MAE\u00b1SD':>16}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}  {'SNR':>8}  {'Acc%':>6}")
+    print("=" * 125)
 
     for m in all_results:
         fname_short = m['file'][:43] if len(m['file']) > 43 else m['file']
@@ -322,10 +327,13 @@ def print_summary(all_results):
         rmse_s = f"{m['rmse']:.2f}"                   if pd.notna(m['rmse']) else "N/A"
         bias_s = f"{m['bias']:+.2f}"                  if pd.notna(m['bias']) else "N/A"
         r_s    = f"{m['r']:.3f}"                      if pd.notna(m['r'])    else "N/A"
+        snr_s  = f"{m['snr_mean']:.2f}dB"             if pd.notna(m.get('snr_mean'))     else "N/A"
+        acc_s  = f"{m['accuracy_pct']:.1f}%"          if pd.notna(m.get('accuracy_pct')) else "N/A"
         print(f"{fname_short:<45} {m['algo']:<12} {m['metric']:<3} {int(m['n']):>5}  "
-              f"{mae_s:>13}{unit[:3]}  {rmse_s:>6}  {bias_s:>7}  {r_s:>6}")
+              f"{mae_s:>13}{unit[:3]}  {rmse_s:>6}  {bias_s:>7}  {r_s:>6}  "
+              f"{snr_s:>8}  {acc_s:>6}")
 
-    print("=" * 105)
+    print("=" * 125)
 
     # --- Aggregate tables ---
     df_r = pd.DataFrame(all_results)
