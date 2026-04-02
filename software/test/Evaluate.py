@@ -18,6 +18,9 @@ import argparse
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -26,6 +29,8 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 RECORDINGS  = os.path.join(SCRIPT_DIR, "data")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 CSV_OUT     = os.path.join(RESULTS_DIR, "csv_raw")
+PLOTS_EVAL  = os.path.join(RESULTS_DIR, "plots_eval")
+ACCURACY_BPM_THRESHOLD = 5    # ±5 bpm — Bartula 2013 / standard rPPG threshold
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +55,84 @@ def compute_metrics(gt, est):
     r, p   = pearsonr(gt, est)
     return dict(n=len(gt), mae=mae, mae_sd=mae_sd,
                 rmse=rmse, bias=bias, r=r, p=p)
+
+
+# NOTE: This is the Wang 2017 narrow-window SNR. It is NOT the same as the
+# broadband SNR in ROIExtraction.py (which is used for region ranking).
+def compute_snr(df):
+    """Compute spectral SNR for a rPPG signal (Wang 2017).
+
+    Estimates signal-to-noise ratio using a narrow frequency window centred on
+    the ground-truth heart rate, with a Hann-windowed power spectrum.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain columns ``signal_sw`` (rPPG signal), ``timestamp``
+        (seconds, float), and ``HR_gt`` (ground-truth heart rate in BPM).
+
+    Returns
+    -------
+    float
+        SNR in dB, or ``np.nan`` if guards are triggered (too short, flat
+        signal, missing GT, or degenerate spectrum).
+    """
+    try:
+        # 1. Extract signal
+        signal = df['signal_sw'].dropna().values
+        if len(signal) < 2 or np.std(signal) < 1e-9:
+            return np.nan
+
+        # 2. Estimate FPS from timestamps
+        ts_all = df['timestamp'].values.astype(float)
+        ts_valid = ts_all[~np.isnan(ts_all)]
+        if len(ts_valid) < 2:
+            return np.nan
+        diffs = np.diff(ts_valid)
+        diffs = diffs[diffs > 0]
+        if len(diffs) == 0:
+            return np.nan
+        fps = 1.0 / np.median(diffs)
+
+        # 3. Duration guard
+        ts = ts_valid
+        if ts[-1] - ts[0] < 30.0:
+            return np.nan
+
+        # 4. Ground-truth frequency
+        hr_gt_valid = df['HR_gt'].values[np.isfinite(df['HR_gt'].values)]
+        if len(hr_gt_valid) == 0:
+            return np.nan
+        f0 = np.nanmean(hr_gt_valid) / 60.0
+        if np.isnan(f0):
+            return np.nan
+
+        # 5. Zero-mean, Hann window, FFT
+        signal = signal - np.mean(signal)
+        signal_windowed = signal * np.hanning(len(signal))
+        spectrum = np.abs(np.fft.rfft(signal_windowed)) ** 2
+        freqs = np.fft.rfftfreq(len(signal), d=1.0 / fps)
+
+        # 6. Band power [0.75, 4.0 Hz]
+        band_mask = (freqs >= 0.75) & (freqs <= 4.0)
+        total_power = np.sum(spectrum[band_mask])
+        if total_power == 0:
+            return np.nan
+
+        # 7. Signal window and noise
+        f_lo = max(0.75, f0 - 0.1)
+        f_hi = min(4.0,  f0 + 0.1)
+        sig_mask = (freqs >= f_lo) & (freqs <= f_hi)
+        P_signal = np.sum(spectrum[sig_mask])
+        P_noise  = total_power - P_signal
+        if P_noise <= 0:
+            return np.nan
+
+        # 8. SNR in dB
+        return float(10.0 * np.log10(P_signal / P_noise))
+
+    except Exception:
+        return np.nan
 
 
 # ---------------------------------------------------------------------------
