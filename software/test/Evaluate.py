@@ -165,6 +165,7 @@ def evaluate_rppg_file(df, fname):
         m['snr_mean']     = snr_val
         m['accuracy_pct'] = acc_val
         m.update(file=fname, algo=algo, metric='HR', unit='BPM')
+        plot_eval_rppg(df, fname, algo, algo_col, m)
         results.append(m)
         snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
         acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
@@ -189,6 +190,87 @@ def evaluate_resp_file(df, fname):
     print(f"  RR BARTULA: n={m['n']}  MAE={m['mae']:.2f}±{m['mae_sd']:.2f}  "
           f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}")
     return [m]
+
+
+def plot_eval_rppg(df, fname, algo, algo_col, metrics):
+    """Generate a 2-row evaluation PNG for one recording × algorithm pair.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Full recording DataFrame.
+    fname : str
+        CSV filename (used for title and output PNG stem).
+    algo : str
+        Algorithm name, e.g. "GREEN".
+    algo_col : str
+        Column name in df, e.g. "HR_GREEN".
+    metrics : dict
+        Result dict with keys: mae, mae_sd, rmse, bias, r, snr_mean, accuracy_pct.
+    """
+    t   = df['timestamp'].values.astype(float)
+    t   = t - t[0]
+    gt  = df['HR_gt'].values.astype(float)
+    est = df[algo_col].values.astype(float)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+    fig.suptitle(f"{fname}  [{algo}]", fontsize=11, fontweight='bold')
+
+    # --- Row 1: BPM over time ---
+    ax1.plot(t, gt,  color='red',   lw=1.0, linestyle='--', label='HR_gt')
+    ax1.plot(t, est, color='green', lw=1.0, linestyle='-',  label=f'HR_{algo}')
+    ax1.set_ylabel('HR (bpm)')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_title('Heart Rate over Time')
+    ax1.legend(fontsize=8, loc='upper right')
+    ax1.grid(True, alpha=0.3)
+
+    # --- Row 2: Bland-Altman ---
+    mask = np.isfinite(gt) & np.isfinite(est)
+    if mask.sum() < 3 or not pd.notna(metrics.get('bias')):
+        ax2.text(0.5, 0.5, 'Insufficient data', ha='center', va='center',
+                 transform=ax2.transAxes, fontsize=12, color='gray')
+        ax2.set_title('Bland-Altman — Insufficient data')
+    else:
+        means = (gt[mask] + est[mask]) / 2.0
+        diffs = est[mask] - gt[mask]
+        bias  = np.mean(diffs)
+        sd    = np.std(diffs, ddof=1)
+        loa_u = bias + 1.96 * sd
+        loa_l = bias - 1.96 * sd
+        ax2.scatter(means, diffs, s=12, alpha=0.6, color='steelblue')
+        ax2.axhline(bias,  color='red',    lw=1.5, linestyle='-',
+                    label=f'Bias={bias:+.2f}')
+        ax2.axhline(loa_u, color='orange', lw=1.0, linestyle='--',
+                    label=f'+1.96SD={loa_u:+.2f}')
+        ax2.axhline(loa_l, color='orange', lw=1.0, linestyle='--',
+                    label=f'\u22121.96SD={loa_l:+.2f}')
+        ax2.axhline(0.0,   color='black',  lw=0.5, linestyle=':')
+        ax2.set_xlabel('Mean of GT and Estimated (bpm)')
+        ax2.set_ylabel('Estimated \u2212 GT (bpm)')
+        ax2.set_title(f'Bland-Altman \u2014 {algo}')
+        ax2.legend(fontsize=7, loc='upper right')
+        ax2.grid(True, alpha=0.3)
+
+    # --- Metrics text box ---
+    snr_s = f"{metrics['snr_mean']:.2f} dB" if pd.notna(metrics.get('snr_mean')) else 'N/A'
+    acc_s = f"{metrics['accuracy_pct']:.1f}%" if pd.notna(metrics.get('accuracy_pct')) else 'N/A'
+    mae_s = f"{metrics['mae']:.2f}" if pd.notna(metrics.get('mae')) else 'N/A'
+    txt = (f"MAE={mae_s}\u00b1{metrics['mae_sd']:.2f}  RMSE={metrics['rmse']:.2f}  "
+           f"Bias={metrics['bias']:+.2f}\nPCC={metrics['r']:.3f}  "
+           f"SNR={snr_s}  Acc={acc_s}")
+    ax1.text(0.99, 0.02, txt, ha='right', va='bottom',
+             transform=ax1.transAxes, fontsize=7.5,
+             bbox=dict(facecolor='white', alpha=0.7, edgecolor='gray', boxstyle='round'))
+
+    # --- Save ---
+    os.makedirs(PLOTS_EVAL, exist_ok=True)
+    stem    = fname.replace('.csv', '')
+    outpath = os.path.join(PLOTS_EVAL, f"{stem}_{algo}.png")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved plot: {os.path.basename(outpath)}")
 
 
 # ---------------------------------------------------------------------------
