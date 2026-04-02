@@ -30,7 +30,8 @@ RECORDINGS  = os.path.join(SCRIPT_DIR, "data")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 CSV_OUT     = os.path.join(RESULTS_DIR, "csv_raw")
 PLOTS_EVAL  = os.path.join(RESULTS_DIR, "plots_eval")
-ACCURACY_BPM_THRESHOLD = 5    # ±5 bpm — Bartula 2013 / standard rPPG threshold
+ACCURACY_BPM_THRESHOLD = 5    # ±5 bpm  — standard rPPG threshold (cardiac)
+ACCURACY_RPM_THRESHOLD = 1    # ±1 rpm  — Bartula 2013 threshold (respiratory)
 
 
 # ---------------------------------------------------------------------------
@@ -59,17 +60,19 @@ def compute_metrics(gt, est):
 
 # NOTE: This is the Wang 2017 narrow-window SNR. It is NOT the same as the
 # broadband SNR in ROIExtraction.py (which is used for region ranking).
+# Supports both cardiac (HR) and respiratory (RR) modes — auto-detected from df.
 def compute_snr(df):
-    """Compute spectral SNR for a rPPG signal (Wang 2017).
+    """Compute spectral SNR using a Hann-windowed narrow-window power ratio.
 
-    Estimates signal-to-noise ratio using a narrow frequency window centred on
-    the ground-truth heart rate, with a Hann-windowed power spectrum.
+    Auto-detects cardiac vs respiratory mode from available GT columns:
+    - Cardiac  (HR_gt present): band [0.75, 4.0 Hz], window ±0.10 Hz (Wang 2017)
+    - Respiratory (RR_gt, no HR_gt): band [0.10, 0.50 Hz], window ±0.05 Hz
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Must contain columns ``signal_sw`` (rPPG signal), ``timestamp``
-        (seconds, float), and ``HR_gt`` (ground-truth heart rate in BPM).
+        Must contain ``signal_sw`` (BVP/resp signal), ``timestamp`` (seconds),
+        and either ``HR_gt`` (BPM) or ``RR_gt`` (RPM).
 
     Returns
     -------
@@ -78,13 +81,26 @@ def compute_snr(df):
         signal, missing GT, or degenerate spectrum).
     """
     try:
-        # 1. Extract signal
+        # 1. Detect mode
+        is_resp = ('RR_gt' in df.columns and
+                   'HR_gt' not in df.columns and
+                   'RR_gt' in df.columns)
+        if is_resp:
+            gt_col   = 'RR_gt'
+            f_band   = (0.10, 0.50)   # respiratory band (Hz)
+            f_tol    = 0.05           # ±0.05 Hz signal window (~±3 rpm)
+        else:
+            gt_col   = 'HR_gt'
+            f_band   = (0.75, 4.00)   # cardiac band (Hz)
+            f_tol    = 0.10           # ±0.10 Hz signal window (Wang 2017)
+
+        # 2. Extract signal
         signal = df['signal_sw'].dropna().values
         if len(signal) < 2 or np.std(signal) < 1e-9:
             return np.nan
 
-        # 2. Estimate FPS from timestamps
-        ts_all = df['timestamp'].values.astype(float)
+        # 3. Estimate FPS from timestamps
+        ts_all   = df['timestamp'].values.astype(float)
         ts_valid = ts_all[~np.isnan(ts_all)]
         if len(ts_valid) < 2:
             return np.nan
@@ -94,41 +110,37 @@ def compute_snr(df):
             return np.nan
         fps = 1.0 / np.median(diffs)
 
-        # 3. Duration guard
-        ts = ts_valid
-        if ts[-1] - ts[0] < 30.0:
+        # 4. Duration guard
+        if ts_valid[-1] - ts_valid[0] < 30.0:
             return np.nan
 
-        # 4. Ground-truth frequency
-        hr_gt_valid = df['HR_gt'].values[np.isfinite(df['HR_gt'].values)]
-        if len(hr_gt_valid) == 0:
+        # 5. Ground-truth frequency anchor
+        gt_valid = df[gt_col].values[np.isfinite(df[gt_col].values)]
+        if len(gt_valid) == 0:
             return np.nan
-        f0 = np.nanmean(hr_gt_valid) / 60.0
+        f0 = float(np.nanmean(gt_valid)) / 60.0   # BPM or RPM → Hz
         if np.isnan(f0):
             return np.nan
 
-        # 5. Zero-mean, Hann window, FFT
+        # 6. Zero-mean, Hann window, FFT
         signal = signal - np.mean(signal)
-        signal_windowed = signal * np.hanning(len(signal))
-        spectrum = np.abs(np.fft.rfft(signal_windowed)) ** 2
-        freqs = np.fft.rfftfreq(len(signal), d=1.0 / fps)
+        spectrum = np.abs(np.fft.rfft(signal * np.hanning(len(signal)))) ** 2
+        freqs    = np.fft.rfftfreq(len(signal), d=1.0 / fps)
 
-        # 6. Band power [0.75, 4.0 Hz]
-        band_mask = (freqs >= 0.75) & (freqs <= 4.0)
+        # 7. Band power
+        band_mask   = (freqs >= f_band[0]) & (freqs <= f_band[1])
         total_power = np.sum(spectrum[band_mask])
         if total_power == 0:
             return np.nan
 
-        # 7. Signal window and noise
-        f_lo = max(0.75, f0 - 0.1)
-        f_hi = min(4.0,  f0 + 0.1)
-        sig_mask = (freqs >= f_lo) & (freqs <= f_hi)
-        P_signal = np.sum(spectrum[sig_mask])
+        # 8. Signal window and noise
+        f_lo     = max(f_band[0], f0 - f_tol)
+        f_hi     = min(f_band[1], f0 + f_tol)
+        P_signal = np.sum(spectrum[(freqs >= f_lo) & (freqs <= f_hi)])
         P_noise  = total_power - P_signal
         if P_noise <= 0:
             return np.nan
 
-        # 8. SNR in dB
         return float(10.0 * np.log10(P_signal / P_noise))
 
     except Exception:
@@ -186,9 +198,23 @@ def evaluate_resp_file(df, fname):
     gt  = df['RR_gt'].values
     est = df['RR_BARTULA'].values
     m   = compute_metrics(gt, est)
+
+    snr_val = compute_snr(df)   # auto-detects RR mode (band 0.10–0.50 Hz)
+    valid_mask = np.isfinite(gt) & np.isfinite(est)
+    if valid_mask.sum() >= 3:
+        acc_val = float(np.mean(np.abs(est[valid_mask] - gt[valid_mask])
+                                <= ACCURACY_RPM_THRESHOLD) * 100.0)
+    else:
+        acc_val = np.nan
+    m['snr_mean']     = snr_val
+    m['accuracy_pct'] = acc_val
     m.update(file=fname, algo='BARTULA', metric='RR', unit='RPM')
+    plot_eval_resp(df, fname, m)
+    snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
+    acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
     print(f"  RR BARTULA: n={m['n']}  MAE={m['mae']:.2f}±{m['mae_sd']:.2f}  "
-          f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}")
+          f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}  "
+          f"SNR={snr_s}  Acc={acc_s}")
     return [m]
 
 
@@ -267,6 +293,83 @@ def plot_eval_rppg(df, fname, algo, algo_col, metrics):
     os.makedirs(PLOTS_EVAL, exist_ok=True)
     stem    = fname.replace('.csv', '')
     outpath = os.path.join(PLOTS_EVAL, f"{stem}_{algo}.png")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved plot: {os.path.basename(outpath)}")
+
+
+def plot_eval_resp(df, fname, metrics):
+    """Generate a 2-row evaluation PNG for a respiratory recording.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Full recording DataFrame with ``RR_gt``, ``RR_BARTULA``, ``timestamp``.
+    fname : str
+        CSV filename (used for title and output PNG stem).
+    metrics : dict
+        Result dict with keys: mae, mae_sd, rmse, bias, r, snr_mean, accuracy_pct.
+    """
+    t   = df['timestamp'].values.astype(float)
+    t   = t - t[0]
+    gt  = df['RR_gt'].values.astype(float)
+    est = df['RR_BARTULA'].values.astype(float)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+    fig.suptitle(f"{fname}  [BARTULA]", fontsize=11, fontweight='bold')
+
+    # --- Row 1: RR over time ---
+    ax1.plot(t, gt,  color='red',  lw=1.0, linestyle='--', label='RR_gt')
+    ax1.plot(t, est, color='blue', lw=1.0, linestyle='-',  label='RR_BARTULA')
+    ax1.set_ylabel('RR (rpm)')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_title('Respiratory Rate over Time')
+    ax1.legend(fontsize=8, loc='upper right')
+    ax1.grid(True, alpha=0.3)
+
+    # --- Row 2: Bland-Altman ---
+    mask = np.isfinite(gt) & np.isfinite(est)
+    if mask.sum() < 3 or not pd.notna(metrics.get('bias')):
+        ax2.text(0.5, 0.5, 'Insufficient data', ha='center', va='center',
+                 transform=ax2.transAxes, fontsize=12, color='gray')
+        ax2.set_title('Bland-Altman — Insufficient data')
+    else:
+        means = (gt[mask] + est[mask]) / 2.0
+        diffs = est[mask] - gt[mask]
+        bias  = np.mean(diffs)
+        sd    = np.std(diffs, ddof=1)
+        loa_u = bias + 1.96 * sd
+        loa_l = bias - 1.96 * sd
+        ax2.scatter(means, diffs, s=12, alpha=0.6, color='steelblue')
+        ax2.axhline(bias,  color='red',    lw=1.5, linestyle='-',
+                    label=f'Bias={bias:+.2f}')
+        ax2.axhline(loa_u, color='orange', lw=1.0, linestyle='--',
+                    label=f'+1.96SD={loa_u:+.2f}')
+        ax2.axhline(loa_l, color='orange', lw=1.0, linestyle='--',
+                    label=f'\u22121.96SD={loa_l:+.2f}')
+        ax2.axhline(0.0,   color='black',  lw=0.5, linestyle=':')
+        ax2.set_xlabel('Mean of GT and Estimated (rpm)')
+        ax2.set_ylabel('Estimated \u2212 GT (rpm)')
+        ax2.set_title('Bland-Altman \u2014 BARTULA')
+        ax2.legend(fontsize=7, loc='upper right')
+        ax2.grid(True, alpha=0.3)
+
+    # --- Metrics text box ---
+    snr_s = f"{metrics['snr_mean']:.2f} dB" if pd.notna(metrics.get('snr_mean')) else 'N/A'
+    acc_s = f"{metrics['accuracy_pct']:.1f}%" if pd.notna(metrics.get('accuracy_pct')) else 'N/A'
+    mae_s = f"{metrics['mae']:.2f}" if pd.notna(metrics.get('mae')) else 'N/A'
+    txt = (f"MAE={mae_s}\u00b1{metrics['mae_sd']:.2f}  RMSE={metrics['rmse']:.2f}  "
+           f"Bias={metrics['bias']:+.2f}\nPCC={metrics['r']:.3f}  "
+           f"SNR={snr_s}  Acc(\u00b11rpm)={acc_s}")
+    ax1.text(0.99, 0.02, txt, ha='right', va='bottom',
+             transform=ax1.transAxes, fontsize=7.5,
+             bbox=dict(facecolor='white', alpha=0.7, edgecolor='gray', boxstyle='round'))
+
+    # --- Save ---
+    os.makedirs(PLOTS_EVAL, exist_ok=True)
+    stem    = fname.replace('.csv', '')
+    outpath = os.path.join(PLOTS_EVAL, f"{stem}_BARTULA.png")
     fig.tight_layout()
     fig.savefig(outpath, dpi=100, bbox_inches='tight')
     plt.close(fig)
