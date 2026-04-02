@@ -148,16 +148,29 @@ def evaluate_rppg_file(df, fname):
         print(f"  [SKIP] No HR_gt in {fname} — run reprocess_gt.py first")
         return []
 
+    snr_val = compute_snr(df)   # computed once — signal_sw is file-level, not per-algo
+
     results = []
     for algo_col in algo_cols:
         algo = algo_col.replace("HR_", "")
         gt   = df['HR_gt'].values
         est  = df[algo_col].values
         m    = compute_metrics(gt, est)
+        valid_mask = np.isfinite(gt) & np.isfinite(est)
+        if valid_mask.sum() >= 3:
+            acc_val = float(np.mean(np.abs(est[valid_mask] - gt[valid_mask])
+                                    <= ACCURACY_BPM_THRESHOLD) * 100.0)
+        else:
+            acc_val = np.nan
+        m['snr_mean']     = snr_val
+        m['accuracy_pct'] = acc_val
         m.update(file=fname, algo=algo, metric='HR', unit='BPM')
         results.append(m)
+        snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
+        acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
         print(f"  HR {algo}: n={m['n']}  MAE={m['mae']:.2f}±{m['mae_sd']:.2f}  "
-              f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}")
+              f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}  "
+              f"SNR={snr_s}  Acc={acc_s}")
     return results
 
 
