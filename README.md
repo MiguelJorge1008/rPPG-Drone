@@ -93,7 +93,7 @@ Developed in **Python 3.11** with OpenCV, MediaPipe and NumPy/SciPy.
 | `test/PPG2csv.py` | Simultaneous rPPG + hardware PPG recording → CSV |
 | `test/Resp2csv.py` | Simultaneous RR + hardware respiration sensor recording → CSV |
 | `test/PlotData.py` | Plot signals and metrics over time per recording (PNG per CSV) |
-| `test/Evaluate.py` | MAE±SD / RMSE / Bias / PCC from stored GT + algo columns |
+| `test/Evaluate.py` | MAE±SD / RMSE / Bias / PCC / SNR / Acc% from stored GT + algo columns; warmup cutoff 30 s (rPPG) / 20 s (respiratory) |
 | `test/RunTest.py` | Full pipeline: PlotData → Evaluate |
 | `test/Arduino/SensorIntegration.ino` | Arduino: reads PPG + respiration sensors, streams over Serial at 115200 baud |
 
@@ -137,10 +137,10 @@ python Resp2csv.py   # RR  + hardware resp → data/Recording_Resp_*.csv
 python RunTest.py
 ```
 
-`Evaluate.py` reads `HR_gt` / `RR_gt` directly from each CSV (computed during recording with a 30 s backward window — same method as the processor) and outputs:
+`Evaluate.py` reads `HR_gt` / `RR_gt` directly from each CSV (computed during recording with a 30 s backward window — same method as the processor). Warmup cutoff: 30 s for rPPG, 20 s for respiratory. Outputs metrics table + per-recording Bland-Altman plots (`results/plots_eval/`):
 
 ```
-Table 1 — Standard algorithms      MAE±SD    RMSE    BIAS    PCC
+Table 1 — Standard algorithms      MAE±SD    RMSE    BIAS    PCC    SNR    Acc%
   GREEN  (no IMU)
   OMIT
   POS_WANG

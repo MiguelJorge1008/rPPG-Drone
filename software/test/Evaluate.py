@@ -110,8 +110,9 @@ def compute_snr(df):
             return np.nan
         fps = 1.0 / np.median(diffs)
 
-        # 4. Duration guard
-        if ts_valid[-1] - ts_valid[0] < 30.0:
+        # 4. Duration guard (10 s cardiac / 15 s respiratory — minimum for spectral resolution)
+        min_dur = 15.0 if is_resp else 10.0
+        if ts_valid[-1] - ts_valid[0] < min_dur:
             return np.nan
 
         # 5. Ground-truth frequency anchor
@@ -151,7 +152,7 @@ def compute_snr(df):
 # Per-file evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_rppg_file(df, fname):
+def evaluate_rppg_file(df, fname, t0):
     algo_cols = [c for c in df.columns if c.startswith("HR_") and c != "HR_gt"]
     if not algo_cols:
         print(f"  [SKIP] No HR_<algo> column in {fname}")
@@ -177,7 +178,7 @@ def evaluate_rppg_file(df, fname):
         m['snr_mean']     = snr_val
         m['accuracy_pct'] = acc_val
         m.update(file=fname, algo=algo, metric='HR', unit='BPM')
-        plot_eval_rppg(df, fname, algo, algo_col, m)
+        plot_eval_rppg(df, fname, algo, algo_col, m, t0)
         results.append(m)
         snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
         acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
@@ -187,7 +188,7 @@ def evaluate_rppg_file(df, fname):
     return results
 
 
-def evaluate_resp_file(df, fname):
+def evaluate_resp_file(df, fname, t0):
     if 'RR_gt' not in df.columns:
         print(f"  [SKIP] No RR_gt in {fname} — run reprocess_gt.py first")
         return []
@@ -209,7 +210,7 @@ def evaluate_resp_file(df, fname):
     m['snr_mean']     = snr_val
     m['accuracy_pct'] = acc_val
     m.update(file=fname, algo='BARTULA', metric='RR', unit='RPM')
-    plot_eval_resp(df, fname, m)
+    plot_eval_resp(df, fname, m, t0)
     snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
     acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
     print(f"  RR BARTULA: n={m['n']}  MAE={m['mae']:.2f}±{m['mae_sd']:.2f}  "
@@ -218,7 +219,7 @@ def evaluate_resp_file(df, fname):
     return [m]
 
 
-def plot_eval_rppg(df, fname, algo, algo_col, metrics):
+def plot_eval_rppg(df, fname, algo, algo_col, metrics, t0):
     """Generate a 2-row evaluation PNG for one recording × algorithm pair.
 
     Parameters
@@ -233,9 +234,11 @@ def plot_eval_rppg(df, fname, algo, algo_col, metrics):
         Column name in df, e.g. "HR_GREEN".
     metrics : dict
         Result dict with keys: mae, mae_sd, rmse, bias, r, snr_mean, accuracy_pct.
+    t0 : float
+        Timestamp of the first row of the original (unfiltered) recording.
     """
     t   = df['timestamp'].values.astype(float)
-    t   = t - t[0]
+    t   = t - t0
     gt  = df['HR_gt'].values.astype(float)
     est = df[algo_col].values.astype(float)
 
@@ -299,7 +302,7 @@ def plot_eval_rppg(df, fname, algo, algo_col, metrics):
     print(f"  Saved plot: {os.path.basename(outpath)}")
 
 
-def plot_eval_resp(df, fname, metrics):
+def plot_eval_resp(df, fname, metrics, t0):
     """Generate a 2-row evaluation PNG for a respiratory recording.
 
     Parameters
@@ -310,9 +313,11 @@ def plot_eval_resp(df, fname, metrics):
         CSV filename (used for title and output PNG stem).
     metrics : dict
         Result dict with keys: mae, mae_sd, rmse, bias, r, snr_mean, accuracy_pct.
+    t0 : float
+        Timestamp of the first row of the original (unfiltered) recording.
     """
     t   = df['timestamp'].values.astype(float)
-    t   = t - t[0]
+    t   = t - t0
     gt  = df['RR_gt'].values.astype(float)
     est = df['RR_BARTULA'].values.astype(float)
 
@@ -512,20 +517,21 @@ def main():
             print(f"  [ERROR] {e}")
             continue
 
-        # Skip warmup buffer: only keep rows from t >= 15 s
-        t0 = df['timestamp'].iloc[0]
-        df = df[df['timestamp'] - t0 >= 15.0].reset_index(drop=True)
-        if df.empty:
-            print(f"  [SKIP] No data after 15 s warmup filter")
-            continue
-
-        is_resp = 'RR_BARTULA' in df.columns
+        is_resp = 'RR_BARTULA' in df.columns and not any(c.startswith('HR_') for c in df.columns)
         is_rppg = any(c.startswith('HR_') for c in df.columns)
 
+        # Skip warmup buffer: 20 s for respiratory, 30 s for rPPG
+        warmup = 20.0 if is_resp else 30.0
+        t0 = df['timestamp'].iloc[0]
+        df = df[df['timestamp'] - t0 >= warmup].reset_index(drop=True)
+        if df.empty:
+            print(f"  [SKIP] No data after {warmup:.0f} s warmup filter")
+            continue
+
         if is_resp and not is_rppg:
-            results = evaluate_resp_file(df, fname)
+            results = evaluate_resp_file(df, fname, t0)
         elif is_rppg:
-            results = evaluate_rppg_file(df, fname)
+            results = evaluate_rppg_file(df, fname, t0)
         else:
             print(f"  [SKIP] Unknown format")
             continue

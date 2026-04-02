@@ -314,7 +314,19 @@ python Evaluate.py               # all recordings in data/
 python Evaluate.py --file X.csv  # single file
 ```
 
-**Metrics:** MAE ± SD, RMSE, Bias, PCC — matching Face2PPG Table I format.
+**Warmup cutoff** — initial samples are discarded before metric computation and plotting:
+
+| Recording type | Cutoff | Reason |
+|----------------|--------|--------|
+| rPPG (HR_*) | 30 s | Matches the 30 s minimum window in `FaceProcessor._estimate_hr_realtime` |
+| Respiratory (RR_BARTULA) | 20 s | Matches `MIN_SEC = 20` in `RespiratoryProcessor` |
+
+**Metrics:** MAE ± SD, RMSE, Bias, PCC, SNR (dB, Wang 2017 narrow-window), Accuracy % — matching Face2PPG Table I format.
+
+**SNR computation (`compute_snr`):**
+- Cardiac band [0.75–4.0 Hz], signal window ±0.10 Hz around GT frequency (Wang 2017)
+- Respiratory band [0.10–0.50 Hz], signal window ±0.05 Hz around GT frequency
+- Duration guard: ≥ 10 s for cardiac, ≥ 15 s for respiratory
 
 **Output — two tables:**
 
@@ -327,7 +339,9 @@ IMU recordings are detected automatically from the filename (contains `imu`).
 
 **No GT recomputation** — ground truth values are read directly from the CSV columns produced by `PPG2csv.py` / `Resp2csv.py`. This guarantees GT and algo estimates use the same computation method (both use 30 s backward windows).
 
-Output: `results/csv_raw/summary_metrics.csv`
+**Output:**
+- `results/plots_eval/<recording>_<algo>.png` — per-recording 2-row plot: rate over time + Bland-Altman; time axis shows actual recording time from the first sample (starts at warmup cutoff)
+- `results/csv_raw/summary_metrics.csv` — aggregate metrics table
 
 ---
 
