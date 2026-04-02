@@ -317,7 +317,7 @@ def _print_agg_table(title, rows):
 def print_summary(all_results):
     print("\n" + "=" * 125)
     print(f"{'FILE':<45} {'ALGO':<12} {'M':<3} {'N':>5}  "
-          f"{'MAE\u00b1SD':>16}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}  {'SNR':>8}  {'Acc%':>6}")
+          f"{'MAE±SD':>16}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}  {'SNR':>8}  {'Acc%':>6}")
     print("=" * 125)
 
     for m in all_results:
