@@ -512,6 +512,13 @@ def main():
             print(f"  [ERROR] {e}")
             continue
 
+        # Skip warmup buffer: only keep rows from t >= 15 s
+        t0 = df['timestamp'].iloc[0]
+        df = df[df['timestamp'] - t0 >= 15.0].reset_index(drop=True)
+        if df.empty:
+            print(f"  [SKIP] No data after 15 s warmup filter")
+            continue
+
         is_resp = 'RR_BARTULA' in df.columns
         is_rppg = any(c.startswith('HR_') for c in df.columns)
 
@@ -530,7 +537,6 @@ def main():
         return
 
     print_summary(all_results)
-    save_summary_csv(all_results)
 
 
 if __name__ == "__main__":
