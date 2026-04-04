@@ -208,25 +208,33 @@ def plot_resp(df, fname, out_dir):
     dt = np.median(np.diff(t[np.isfinite(t)]))
     fs = 1.0 / dt if dt > 0 else 25.0
 
-    hw = _prep_signal(df["signal_hw"].values, fs)
-    sw_full = _prep_signal(df["signal_sw"].values, fs)
+    has_hw = "signal_hw" in df.columns and df["signal_hw"].notna().any()
 
+    sw_full = _prep_signal(df["signal_sw"].values, fs)
     sw_idx = _dedup(sw_full, t)
     sw = sw_full[sw_idx]
     t_sw = t[sw_idx]
     fs_sw = 1.0 / np.median(np.diff(t_sw)) if len(t_sw) > 1 else fs
 
-    hw_peaks, hw_filt = _detect_peaks(hw, fs, min_dist_s=1.5)
     sw_peaks, sw_filt = _detect_peaks(sw, fs_sw, min_dist_s=1.5)
-    hw_filt_n = normalise(hw_filt)
     sw_filt_n = normalise(sw_filt)
+
+    if has_hw:
+        hw = _prep_signal(df["signal_hw"].values, fs)
+        hw_peaks, hw_filt = _detect_peaks(hw, fs, min_dist_s=1.5)
+        hw_filt_n = normalise(hw_filt)
+        hw_mid, hw_bbi = _ibi(hw_peaks, t)
+    else:
+        hw_peaks, hw_filt_n = np.array([], dtype=int), np.array([])
+        hw_mid, hw_bbi = np.array([]), np.array([])
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     fig.suptitle(fname, fontsize=11, fontweight="bold")
 
-    # --- Row 0: signals + peaks (sw uses deduped time axis) ---
+    # --- Row 0: signals + peaks ---
     ax = axes[0]
-    ax.plot(t,    hw_filt_n, color="blue", lw=0.8, alpha=0.85, label="HW resp (z-norm)")
+    if has_hw:
+        ax.plot(t,    hw_filt_n, color="blue", lw=0.8, alpha=0.85, label="HW resp (z-norm)")
     ax.plot(t_sw, sw_filt_n, color="cyan", lw=0.8, alpha=0.75, label="SW resp (z-norm)")
     if len(hw_peaks):
         ax.scatter(t[hw_peaks],    hw_filt_n[hw_peaks],    color="darkblue", s=28, zorder=5, label=f"HW peaks ({len(hw_peaks)})")
@@ -238,7 +246,8 @@ def plot_resp(df, fname, out_dir):
     ax.grid(True, alpha=0.3)
 
     # --- Row 1: RR over time ---
-    axes[1].plot(t, df["RR_gt"],      color="blue", lw=1.2, label="RR_gt  (hardware)")
+    if has_hw and "RR_gt" in df.columns:
+        axes[1].plot(t, df["RR_gt"], color="blue", lw=1.2, label="RR_gt  (hardware)")
     axes[1].plot(t, df["RR_BARTULA"], color="cyan", lw=1.2, label="RR_BARTULA  (camera)", alpha=0.8)
     axes[1].set_ylabel("RPM")
     axes[1].set_title("Respiration Rate over time")
@@ -247,16 +256,14 @@ def plot_resp(df, fname, out_dir):
 
     # --- Row 2: BBI ---
     ax = axes[2]
-    if "BBI_gt" in df.columns and "BBI_BARTULA" in df.columns:
-        # new recordings — use CSV columns directly
-        ax.plot(t, df["BBI_gt"],      color="blue", lw=1.2, label="BBI_gt  (hardware)")
+    if "BBI_BARTULA" in df.columns:
+        if has_hw and "BBI_gt" in df.columns:
+            ax.plot(t, df["BBI_gt"], color="blue", lw=1.2, label="BBI_gt  (hardware)")
         ax.plot(t, df["BBI_BARTULA"], color="cyan", lw=1.2, label="BBI_BARTULA  (camera)", alpha=0.8)
         ax.axhspan(1.5, 10.0, color="gray", alpha=0.08, label="Valid [1.5–10 s]")
         ax.set_ylabel("BBI (s)")
         ax.legend(fontsize=8, loc="upper right")
     else:
-        # old recordings — recompute from signal
-        hw_mid, hw_bbi = _ibi(hw_peaks, t)
         sw_mid, sw_bbi = _ibi(sw_peaks, t_sw)
         _plot_ibi(ax, hw_mid, hw_bbi, sw_mid, sw_bbi,
                   ylabel="BBI (s)", valid_lo=1.5, valid_hi=10.0,

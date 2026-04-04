@@ -353,35 +353,47 @@ def print_summary(all_results):
         label = algo if imu is not False else algo
         return _agg_row(label, unit, sub)
 
-    t1_rows = [
-        agg('GREEN',   'HR',    imu=False),
-        agg('GREEN',   'SDNN',  imu=False),
-        agg('GREEN',   'RMSSD', imu=False),
-        agg('OMIT',    'HR'),
-        agg('OMIT',    'SDNN'),
-        agg('OMIT',    'RMSSD'),
-        agg('POS_WANG','HR'),
-        agg('POS_WANG','SDNN'),
-        agg('POS_WANG','RMSSD'),
-        agg('BARTULA', 'RR'),
-        agg('BARTULA', 'BBI'),
-    ]
-    t1_rows = [r for r in t1_rows if r is not None]
+    # Table 1 — Rates: standard algorithms (no motion compensation)
+    t1_rows = [r for r in [
+        agg('GREEN',    'HR',  imu=False),
+        agg('OMIT',     'HR'),
+        agg('POS_WANG', 'HR'),
+        agg('BARTULA',  'RR'),
+    ] if r is not None]
 
-    t2_rows = [
-        agg('GREEN',   'HR',    imu=True),
-        agg('GREEN',   'SDNN',  imu=True),
-        agg('GREEN',   'RMSSD', imu=True),
-        agg('LMS',     'HR'),
-        agg('LMS',     'SDNN'),
-        agg('LMS',     'RMSSD'),
-    ]
-    t2_rows = [r for r in t2_rows if r is not None]
+    # Table 2 — Rates: motion / IMU compensation
+    t2_rows = [r for r in [
+        agg('GREEN', 'HR', imu=True),
+        agg('LMS',   'HR'),
+    ] if r is not None]
+
+    # Table 3 — HRV + RRV: standard algorithms (no IMU)
+    t3_rows = [r for r in [
+        agg('GREEN',    'SDNN',  imu=False),
+        agg('GREEN',    'RMSSD', imu=False),
+        agg('OMIT',     'SDNN'),
+        agg('OMIT',     'RMSSD'),
+        agg('POS_WANG', 'SDNN'),
+        agg('POS_WANG', 'RMSSD'),
+        agg('BARTULA',  'BBI'),
+    ] if r is not None]
+
+    # Table 4 — HRV: motion / IMU compensation
+    t4_rows = [r for r in [
+        agg('GREEN', 'SDNN',  imu=True),
+        agg('GREEN', 'RMSSD', imu=True),
+        agg('LMS',   'SDNN'),
+        agg('LMS',   'RMSSD'),
+    ] if r is not None]
 
     if t1_rows:
-        _print_agg_table("Table 1 — Standard algorithms", t1_rows)
+        _print_agg_table("Table 1 — Rate: standard algorithms", t1_rows)
     if t2_rows:
-        _print_agg_table("Table 2 — IMU / Motion compensation", t2_rows)
+        _print_agg_table("Table 2 — Rate: motion / IMU compensation", t2_rows)
+    if t3_rows:
+        _print_agg_table("Table 3 — HRV + RRV: standard algorithms", t3_rows)
+    if t4_rows:
+        _print_agg_table("Table 4 — HRV: motion / IMU compensation", t4_rows)
 
 
 def save_summary_csv(all_results):
@@ -430,7 +442,7 @@ def main():
         is_rppg = any(c.startswith('HR_') for c in df.columns)
 
         # Skip warmup buffer: 20 s for respiratory, 30 s for rPPG
-        warmup = 20.0 if is_resp else 30.0
+        warmup = 30.0
         t0 = df['timestamp'].iloc[0]
         df = df[df['timestamp'] - t0 >= warmup].reset_index(drop=True)
         if df.empty:

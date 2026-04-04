@@ -1,10 +1,8 @@
 """
-ComputeMetrics.py — Post-process BVP and RESP recordings into metrics CSVs.
+ComputeMetrics.py — Post-process BVP and RESP recordings into metrics.
 
 rPPG  : BVP_<ALGO>_<ts>_sw.csv + _hw.csv  ->  HR, SDNN, RMSSD
 Resp  : RESP_<ts>_sw.csv       + _hw.csv  ->  RR, BBI
-
-SW and HW have different sample rates — each is handled on its own time axis.
 
 Usage:
     python ComputeMetrics.py                          # all pairs in data/
@@ -70,19 +68,17 @@ def bandpass(sig, fs, lo, hi, order=2):
 
 
 # ---------------------------------------------------------------------------
-# Process one pair
+# Process one rPPG pair
 # ---------------------------------------------------------------------------
 
 def process_pair(sw_fname):
-    """Compute metrics for one _sw / _hw pair. Returns output DataFrame or None."""
-    # derive partner filename and algo
-    base  = sw_fname.replace("_sw.csv", "")   # BVP_<ALGO>_<ts>
-    parts = base.split("_")                    # ['BVP', algo, ts]
+    """Compute metrics for one _sw / _hw pair. Returns metrics DataFrame or None."""
+    base  = sw_fname.replace("_sw.csv", "")
+    parts = base.split("_")
     if len(parts) < 3:
         print(f"  [SKIP] Cannot parse algo from {sw_fname}")
         return None, None
-    algo  = parts[1]
-    ts    = parts[2]
+    algo     = parts[1]
     hw_fname = f"{base}_hw.csv"
 
     sw_path = os.path.join(DATA_DIR, sw_fname)
@@ -95,28 +91,20 @@ def process_pair(sw_fname):
         print(f"  [NOT FOUND] {hw_fname}")
         return None, None
 
-    df_sw_orig = pd.read_csv(sw_path)
-    df_hw      = pd.read_csv(hw_path)
+    df_sw = pd.read_csv(sw_path)
+    df_hw = pd.read_csv(hw_path)
 
-    t_sw  = df_sw_orig["timestamp"].values.astype(float)
-    sig_sw = df_sw_orig["signal_sw"].values.astype(float)
+    t_sw   = df_sw["timestamp"].values.astype(float)
+    sig_sw = df_sw["signal_sw"].values.astype(float)
 
     t_hw   = df_hw["timestamp"].values.astype(float)
     sig_hw = df_hw["signal_hw"].values.astype(float)
 
-    # effective sample rates
     fs_sw = 1.0 / np.median(np.diff(t_sw)) if len(t_sw) > 1 else 25.0
     fs_hw = 1.0 / np.median(np.diff(t_hw)) if len(t_hw) > 1 else 100.0
 
     hw_all_zero = np.all(sig_hw == 0)
 
-    # interpolate HW signal to SW timestamps for the output signal_hw column
-    if not hw_all_zero and len(t_hw) > 1:
-        sig_hw_interp = np.interp(t_sw, t_hw, sig_hw)
-    else:
-        sig_hw_interp = np.zeros(len(t_sw))
-
-    # deduplicate SW signal (remove consecutive identical values = plateaus)
     dd_idx    = np.concatenate([[True], np.diff(sig_sw) != 0])
     t_sw_dd   = t_sw[dd_idx]
     sig_sw_dd = sig_sw[dd_idx]
@@ -127,27 +115,18 @@ def process_pair(sw_fname):
           f"HW: {len(t_hw)} samples @ {fs_hw:.1f} Hz")
 
     rows = []
-    for i, t_i in enumerate(t_sw):
-        # --- SW window: deduped data from start up to t_i ---
+    for t_i in t_sw:
         sw_dd_mask = t_sw_dd <= t_i
         sw_win_dd  = sig_sw_dd[sw_dd_mask]
 
-        hr_sw    = np.nan
-        sdnn_sw  = np.nan
-        rmssd_sw = np.nan
-
+        hr_sw = sdnn_sw = rmssd_sw = np.nan
         if len(sw_win_dd) >= int(fs_sw_dd * 5):
             hr_sw, sdnn_sw, rmssd_sw = metrics_from_peaks(sw_win_dd, fs_sw_dd)
 
-        # --- HW window: all data from start up to t_i ---
-        hr_hw    = np.nan
-        sdnn_hw  = np.nan
-        rmssd_hw = np.nan
-
+        hr_hw = sdnn_hw = rmssd_hw = np.nan
         if not hw_all_zero and len(t_hw) > 1:
             hw_mask = t_hw <= t_i
             hw_win  = sig_hw[hw_mask]
-
             if len(hw_win) >= int(fs_hw * 5):
                 try:
                     hw_filt = bandpass(hw_win, fs_hw, 0.75, 4.0)
@@ -156,42 +135,16 @@ def process_pair(sw_fname):
                 hr_hw, sdnn_hw, rmssd_hw = metrics_from_peaks(hw_filt, fs_hw)
 
         rows.append({
-            'HR_gt':         hr_hw,
-            f'HR_{algo}':    hr_sw,
-            'SDNN_gt':       sdnn_hw,
-            f'SDNN_{algo}':  sdnn_sw,
-            'RMSSD_gt':      rmssd_hw,
-            f'RMSSD_{algo}': rmssd_sw,
+            'timestamp':       t_i,
+            'HR_gt':           hr_hw,
+            f'HR_{algo}':      hr_sw,
+            'SDNN_gt':         sdnn_hw,
+            f'SDNN_{algo}':    sdnn_sw,
+            'RMSSD_gt':        rmssd_hw,
+            f'RMSSD_{algo}':   rmssd_sw,
         })
 
-    df_metrics = pd.DataFrame(rows)
-
-    # SW file: only SW metrics
-    for col in [f'HR_{algo}', f'SDNN_{algo}', f'RMSSD_{algo}']:
-        df_sw_orig[col] = df_metrics[col].values
-
-    # HW file: only HW metrics (on HW timestamps)
-    df_hw_out = None
-    if not hw_all_zero:
-        hw_rows = []
-        for j, t_j in enumerate(t_hw):
-            hw_mask = t_hw <= t_j
-            hw_win  = sig_hw[hw_mask]
-            hr_hw = sdnn_hw = rmssd_hw = np.nan
-            if len(hw_win) >= int(fs_hw * 5):
-                try:
-                    hw_filt = bandpass(hw_win, fs_hw, 0.75, 4.0)
-                except Exception:
-                    hw_filt = hw_win
-                hr_hw, sdnn_hw, rmssd_hw = metrics_from_peaks(hw_filt, fs_hw)
-            hw_rows.append({'HR_gt': hr_hw, 'SDNN_gt': sdnn_hw, 'RMSSD_gt': rmssd_hw})
-
-        df_hw_metrics = pd.DataFrame(hw_rows)
-        df_hw_out = pd.read_csv(hw_path)
-        for col in ['HR_gt', 'SDNN_gt', 'RMSSD_gt']:
-            df_hw_out[col] = df_hw_metrics[col].values
-
-    return df_sw_orig, df_hw_out, algo
+    return pd.DataFrame(rows), algo
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +153,7 @@ def process_pair(sw_fname):
 
 def process_resp_pair(sw_fname):
     """Compute RR and BBI for one RESP _sw / _hw pair."""
-    base     = sw_fname.replace("_sw.csv", "")   # RESP_<ts>
+    base     = sw_fname.replace("_sw.csv", "")
     hw_fname = f"{base}_hw.csv"
 
     sw_path = os.path.join(DATA_DIR, sw_fname)
@@ -208,16 +161,16 @@ def process_resp_pair(sw_fname):
 
     if not os.path.exists(sw_path):
         print(f"  [NOT FOUND] {sw_fname}")
-        return None, None
+        return None
     if not os.path.exists(hw_path):
         print(f"  [NOT FOUND] {hw_fname}")
-        return None, None
+        return None
 
-    df_sw_orig = pd.read_csv(sw_path)
-    df_hw      = pd.read_csv(hw_path)
+    df_sw = pd.read_csv(sw_path)
+    df_hw = pd.read_csv(hw_path)
 
-    t_sw   = df_sw_orig["timestamp"].values.astype(float)
-    sig_sw = df_sw_orig["signal_sw"].values.astype(float)
+    t_sw   = df_sw["timestamp"].values.astype(float)
+    sig_sw = df_sw["signal_sw"].values.astype(float)
 
     t_hw   = df_hw["timestamp"].values.astype(float)
     sig_hw = df_hw["signal_hw"].values.astype(float)
@@ -230,38 +183,32 @@ def process_resp_pair(sw_fname):
     print(f"  SW: {len(t_sw)} samples @ {fs_sw:.1f} Hz  |  "
           f"HW: {len(t_hw)} samples @ {fs_hw:.1f} Hz")
 
-    # --- SW growing window ---
-    rows_sw = []
+    SLIDE_S = 30.0
+
+    rows = []
     for t_i in t_sw:
-        sw_mask = t_sw <= t_i
+        sw_mask = (t_sw <= t_i) & (t_sw > t_i - SLIDE_S)
         sw_win  = sig_sw[sw_mask]
         rr_sw = bbi_sw = np.nan
-        if len(sw_win) >= int(fs_sw * 10):   # need ~2 breaths at min 5 RPM
+        if len(sw_win) >= int(fs_sw * SLIDE_S * 0.5):
             rr_sw, bbi_sw = resp_metrics_from_peaks(sw_win, fs_sw)
-        rows_sw.append({'RR_BARTULA': rr_sw, 'BBI_BARTULA': bbi_sw})
 
-    df_sw_metrics = pd.DataFrame(rows_sw)
-    for col in ['RR_BARTULA', 'BBI_BARTULA']:
-        df_sw_orig[col] = df_sw_metrics[col].values
-
-    # --- HW growing window (own time axis) ---
-    df_hw_out = None
-    if not hw_all_zero:
-        rows_hw = []
-        for t_j in t_hw:
-            hw_mask = t_hw <= t_j
+        rr_hw = bbi_hw = np.nan
+        if not hw_all_zero and len(t_hw) > 1:
+            hw_mask = (t_hw <= t_i) & (t_hw > t_i - SLIDE_S)
             hw_win  = sig_hw[hw_mask]
-            rr_hw = bbi_hw = np.nan
-            if len(hw_win) >= int(fs_hw * 10):
+            if len(hw_win) >= int(fs_hw * SLIDE_S * 0.5):
                 rr_hw, bbi_hw = resp_metrics_from_peaks(hw_win, fs_hw)
-            rows_hw.append({'RR_gt': rr_hw, 'BBI_gt': bbi_hw})
 
-        df_hw_metrics = pd.DataFrame(rows_hw)
-        df_hw_out = pd.read_csv(hw_path)
-        for col in ['RR_gt', 'BBI_gt']:
-            df_hw_out[col] = df_hw_metrics[col].values
+        rows.append({
+            'timestamp':    t_i,
+            'RR_BARTULA':   rr_sw,
+            'BBI_BARTULA':  bbi_sw,
+            'RR_gt':        rr_hw,
+            'BBI_gt':       bbi_hw,
+        })
 
-    return df_sw_orig, df_hw_out
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -290,29 +237,17 @@ def main():
 
     for sw_fname in bvp_files:
         print(f"\nProcessing rPPG: {sw_fname}")
-        df_sw_out, df_hw_out, algo = process_pair(sw_fname)
-        if df_sw_out is None:
+        df_metrics, algo = process_pair(sw_fname)
+        if df_metrics is None:
             continue
-        sw_path = os.path.join(DATA_DIR, sw_fname)
-        df_sw_out.to_csv(sw_path, index=False)
-        print(f"  Updated SW: {sw_fname}  ({len(df_sw_out)} rows)")
-        if df_hw_out is not None:
-            hw_fname = sw_fname.replace("_sw.csv", "_hw.csv")
-            df_hw_out.to_csv(os.path.join(DATA_DIR, hw_fname), index=False)
-            print(f"  Updated HW: {hw_fname}  ({len(df_hw_out)} rows)")
+        print(df_metrics.tail(5).to_string(index=False))
 
     for sw_fname in resp_files:
         print(f"\nProcessing Resp: {sw_fname}")
-        df_sw_out, df_hw_out = process_resp_pair(sw_fname)
-        if df_sw_out is None:
+        df_metrics = process_resp_pair(sw_fname)
+        if df_metrics is None:
             continue
-        sw_path = os.path.join(DATA_DIR, sw_fname)
-        df_sw_out.to_csv(sw_path, index=False)
-        print(f"  Updated SW: {sw_fname}  ({len(df_sw_out)} rows)")
-        if df_hw_out is not None:
-            hw_fname = sw_fname.replace("_sw.csv", "_hw.csv")
-            df_hw_out.to_csv(os.path.join(DATA_DIR, hw_fname), index=False)
-            print(f"  Updated HW: {hw_fname}  ({len(df_hw_out)} rows)")
+        print(df_metrics.tail(5).to_string(index=False))
 
     print("\nDone.")
 

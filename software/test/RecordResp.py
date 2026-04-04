@@ -33,7 +33,7 @@ from RespiratoryProcessor import RespiratoryProcessor
 XIAO_IP     = "http://192.168.4.1"
 SERIAL_PORT = 'COM3'
 BAUD_RATE   = 115200
-WARMUP_S    = 20
+WARMUP_S    = 30
 RECORD_S    = 60
 
 
@@ -112,6 +112,22 @@ def main():
         out_dir = os.path.join(current_dir, "data")
         os.makedirs(out_dir, exist_ok=True)
 
+        fname_sw = f"RESP_{ts_tag}_sw.csv"
+        fname_hw = f"RESP_{ts_tag}_hw.csv"
+
+        # --- HW CSV (serial rate, ~100 Hz) ---
+        with serial_lock:
+            hw_copy = list(hw_rows)
+
+        if hw_copy:
+            df_hw = pd.DataFrame(hw_copy)
+            df_hw['timestamp'] = df_hw['timestamp'] - df_hw['timestamp'].iloc[0]
+            df_hw.to_csv(os.path.join(out_dir, fname_hw), index=False)
+            dur_hw = df_hw['timestamp'].iloc[-1]
+            print(f"Saved HW: {len(df_hw)} samples @ ~{len(df_hw)/dur_hw:.1f} Hz -> {fname_hw}")
+        else:
+            df_hw = None
+
         # --- SW CSV (camera frame rate) ---
         timestamps = list(proc.frame_timestamps)
         position   = list(proc.position_signal)
@@ -122,42 +138,30 @@ def main():
             t_rel = np.array(timestamps) - t0_sw
             fs_sw = 1.0 / np.median(np.diff(t_rel)) if len(t_rel) > 1 else 25.0
 
-            # apply Bartula filter (detrend + bandpass 0.1-0.5 Hz) to full signal
             try:
                 sig_filt = RespiratoryProcessor.apply_filters(np.array(position, dtype=float), fs_sw)
             except Exception:
                 sig_filt = np.array(position, dtype=float)
 
             df_sw = pd.DataFrame({'timestamp': t_rel, 'signal_sw': sig_filt})
-            fname_sw = f"RESP_{ts_tag}_sw.csv"
             df_sw.to_csv(os.path.join(out_dir, fname_sw), index=False)
             dur = df_sw['timestamp'].iloc[-1]
             print(f"Saved SW: {len(df_sw)} samples @ ~{len(df_sw)/dur:.1f} Hz -> {fname_sw}")
-        else:
-            print("No SW respiration data.")
 
-        # --- HW CSV (serial rate, ~100 Hz) ---
-        with serial_lock:
-            hw_copy = list(hw_rows)
+        # --- fill missing signal with zeros ---
+        ref_t = (df_sw['timestamp'].values if df_sw is not None
+                 else df_hw['timestamp'].values if df_hw is not None
+                 else np.array([0.0]))
 
-        if hw_copy:
-            df_hw = pd.DataFrame(hw_copy)
-            df_hw['timestamp'] = df_hw['timestamp'] - df_hw['timestamp'].iloc[0]
-            fname_hw = f"RESP_{ts_tag}_hw.csv"
-            df_hw.to_csv(os.path.join(out_dir, fname_hw), index=False)
-            dur_hw = df_hw['timestamp'].iloc[-1]
-            print(f"Saved HW: {len(df_hw)} samples @ ~{len(df_hw)/dur_hw:.1f} Hz -> {fname_hw}")
-        else:
-            if df_sw is not None:
-                df_hw_zero = pd.DataFrame({
-                    'timestamp': df_sw['timestamp'].values,
-                    'signal_hw': np.zeros(len(df_sw))
-                })
-            else:
-                df_hw_zero = pd.DataFrame({'timestamp': [0.0], 'signal_hw': [0.0]})
-            fname_hw = f"RESP_{ts_tag}_hw.csv"
-            df_hw_zero.to_csv(os.path.join(out_dir, fname_hw), index=False)
+        if df_hw is None:
+            pd.DataFrame({'timestamp': ref_t, 'signal_hw': np.zeros(len(ref_t))}).to_csv(
+                os.path.join(out_dir, fname_hw), index=False)
             print(f"No HW signal — saved zeros -> {fname_hw}")
+
+        if df_sw is None:
+            pd.DataFrame({'timestamp': ref_t, 'signal_sw': np.zeros(len(ref_t))}).to_csv(
+                os.path.join(out_dir, fname_sw), index=False)
+            print(f"No SW signal — saved zeros -> {fname_sw}")
 
 
 if __name__ == "__main__":

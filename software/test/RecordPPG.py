@@ -172,38 +172,44 @@ def main():
                 if std > 0:
                     df_sw["signal_sw"] = (df_sw["signal_sw"] - df_sw["signal_sw"].mean()) / std
 
-        if df_sw is not None and not df_sw.empty:
-            fname_sw = f"BVP_{algo}_{ts_tag}_sw.csv"
-            df_sw.to_csv(os.path.join(out_dir, fname_sw), index=False)
-            dur = df_sw["timestamp"].iloc[-1]
-            print(f"Saved SW: {len(df_sw)} samples @ ~{len(df_sw)/dur:.1f} Hz → {fname_sw}")
-        else:
-            print("No SW BVP data in recording window.")
-            df_sw = None
+        fname_sw = f"BVP_{algo}_{ts_tag}_sw.csv"
+        fname_hw = f"BVP_{algo}_{ts_tag}_hw.csv"
 
-        # --- HW CSV (serial rate, ~100 Hz — different fs from SW) ---
+        # --- HW CSV (serial rate, ~100 Hz) ---
         with serial_lock:
             hw_copy = list(hw_rows)
 
         if hw_copy:
             df_hw = pd.DataFrame(hw_copy)
             df_hw['timestamp'] = df_hw['timestamp'] - df_hw['timestamp'].iloc[0]
-            fname_hw = f"BVP_{algo}_{ts_tag}_hw.csv"
             df_hw.to_csv(os.path.join(out_dir, fname_hw), index=False)
             dur_hw = df_hw['timestamp'].iloc[-1]
             print(f"Saved HW: {len(df_hw)} samples @ ~{len(df_hw)/dur_hw:.1f} Hz → {fname_hw}")
         else:
-            # no Arduino — save zeros at SW timestamps so file always exists
-            if df_sw is not None:
-                df_hw_zero = pd.DataFrame({
-                    'timestamp': df_sw['timestamp'].values,
-                    'signal_hw': np.zeros(len(df_sw))
-                })
-            else:
-                df_hw_zero = pd.DataFrame({'timestamp': [0.0], 'signal_hw': [0.0]})
-            fname_hw = f"BVP_{algo}_{ts_tag}_hw.csv"
-            df_hw_zero.to_csv(os.path.join(out_dir, fname_hw), index=False)
+            df_hw = None
+
+        # --- SW CSV (camera frame rate, ~25 fps) ---
+        if df_sw is not None and not df_sw.empty:
+            df_sw.to_csv(os.path.join(out_dir, fname_sw), index=False)
+            dur = df_sw["timestamp"].iloc[-1]
+            print(f"Saved SW: {len(df_sw)} samples @ ~{len(df_sw)/dur:.1f} Hz → {fname_sw}")
+        else:
+            df_sw = None
+
+        # --- fill missing signal with zeros ---
+        ref_t = (df_sw['timestamp'].values if df_sw is not None
+                 else df_hw['timestamp'].values if df_hw is not None
+                 else np.array([0.0]))
+
+        if df_hw is None:
+            pd.DataFrame({'timestamp': ref_t, 'signal_hw': np.zeros(len(ref_t))}).to_csv(
+                os.path.join(out_dir, fname_hw), index=False)
             print(f"No HW signal — saved zeros → {fname_hw}")
+
+        if df_sw is None:
+            pd.DataFrame({'timestamp': ref_t, 'signal_sw': np.zeros(len(ref_t))}).to_csv(
+                os.path.join(out_dir, fname_sw), index=False)
+            print(f"No SW signal — saved zeros → {fname_sw}")
 
 
 if __name__ == "__main__":
