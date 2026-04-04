@@ -1,7 +1,7 @@
 """
 RunTest.py — Runs the full validation pipeline in order:
-  1. ComputeMetrics → adds HR/SDNN/RMSSD columns to BVP _sw.csv files
-  2. Evaluate       → results/plots_eval/  (metrics + PlotData plots)
+  1. ComputeMetrics → computes metrics, writes to results/metrics/
+  2. Evaluate       → evaluates metrics + plots, writes to results/plots_eval/
 """
 
 import os

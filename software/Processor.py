@@ -4,16 +4,14 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from scipy import signal as sp_signal
+from scipy.signal import find_peaks
 from scipy import sparse
 from DataHandler import CameraHandler
 from algoritmos.green import GREEN
 from algoritmos.omit import OMIT
 from algoritmos.pos_wang import POS_WANG
 from algoritmos.adaptive_lms import ADAPTIVE_LMS
-from ROIExtraction import (ROI_FOREHEAD, ROI_FACE, ROI_MULTI,
-                            GRID_N, R_MAX, MIN_REGION_PIXELS,
-                            get_roi_polygon, extract_grid_rgb,
-                            dmrs_select, draw_grid_overlay)
+from ROIExtraction import get_roi_polygon
 
 mp_face_mesh = mp.solutions.face_mesh
 mp_drawing   = mp.solutions.drawing_utils
@@ -24,7 +22,7 @@ HR_ALPHA       = 0.1
 
 class FaceProcessor:
     def __init__(self, camera: CameraHandler, imu=None, algo: str = "GREEN",
-                 roi: str = ROI_FACE, display: bool = True):
+                 display: bool = True):
         """
         Initialises the FaceProcessor.
 
@@ -40,7 +38,6 @@ class FaceProcessor:
         self.camera   = camera
         self.imu      = imu
         self.algo     = algo
-        self.roi      = roi
         self.display  = display
 
         self.face_mesh = mp_face_mesh.FaceMesh(
@@ -50,9 +47,7 @@ class FaceProcessor:
             min_tracking_confidence=0.5
         )
 
-        self.rgb_signal          = []   # list of [R_mean, G_mean, B_mean] per frame (full face)
-        self.region_rgb          = []   # list of (K, 3) arrays per frame — grid regions
-        self.region_valid        = []   # list of (K,) bool arrays — cells with enough skin pixels
+        self.rgb_signal          = []   # list of [R_mean, G_mean, B_mean] per frame
         self.frame_timestamps    = []
         self.hr_estimate         = None
         self.landmark_ema        = None
@@ -64,7 +59,6 @@ class FaceProcessor:
         self._hr_lock         = threading.Lock()
         self._latest_bvps     = None
         self._bvps_fresh      = False   # True only when new BVP result not yet plotted
-        self._selected_regions = []     # DMRS-selected region indices (for visualisation)
 
     # ── Face and ROI ──────────────────────────────────────────────────────────
 
@@ -104,8 +98,7 @@ class FaceProcessor:
                     )
                 )
                 poly, self.landmark_ema = get_roi_polygon(
-                    face_landmarks, w, h, self.landmark_ema, LANDMARK_ALPHA,
-                    roi_mode=self.roi
+                    face_landmarks, w, h, self.landmark_ema, LANDMARK_ALPHA
                 )
 
                 face_mask = np.zeros((h, w), dtype=np.uint8)
@@ -115,22 +108,11 @@ class FaceProcessor:
                     face_mean = roi_pixels.mean(axis=0)
                     self.rgb_signal.append(face_mean)
                     self.frame_timestamps.append(time.time())
-                    if self.roi == ROI_MULTI:
-                        grid_means, grid_valid = extract_grid_rgb(
-                            rgb, face_mask, poly, h, w, face_mean
-                        )
-                        self.region_rgb.append(grid_means)
-                        self.region_valid.append(grid_valid)
 
                 cv2.polylines(small, [poly], isClosed=True, color=(0, 255, 255), thickness=1)
-                if self.roi == ROI_MULTI:
-                    with self._hr_lock:
-                        sel = list(self._selected_regions)
-                    draw_grid_overlay(small, poly, h, w, sel)
-                else:
-                    overlay = small.copy()
-                    cv2.fillPoly(overlay, [poly], color=(0, 255, 255))
-                    cv2.addWeighted(overlay, 0.2, small, 0.8, 0, small)
+                overlay = small.copy()
+                cv2.fillPoly(overlay, [poly], color=(0, 255, 255))
+                cv2.addWeighted(overlay, 0.2, small, 0.8, 0, small)
 
             frame = cv2.resize(small, (frame.shape[1], frame.shape[0]))
         return frame
@@ -165,19 +147,7 @@ class FaceProcessor:
         if len(self.rgb_signal) < window:
             return None
 
-        # Multi-region: use last DMRS-selected regions (updated separately)
-        if self.roi == ROI_MULTI:
-            with self._hr_lock:
-                sel = list(self._selected_regions)
-            if sel and len(self.region_rgb) >= window:
-                region_win = np.array(self.region_rgb[-window:])
-                rgb_win    = region_win[:, sel, :].mean(axis=1)
-            else:
-                rgb_win = np.array(self.rgb_signal[-window:])
-            selected = sel
-        else:
-            rgb_win  = np.array(self.rgb_signal[-window:])
-            selected = []
+        rgb_win = np.array(self.rgb_signal[-window:])
 
         if self.algo == 'GREEN':
             raw = GREEN(rgb_win)
@@ -197,12 +167,12 @@ class FaceProcessor:
         bvp  = self.apply_filters(raw, fs)
         bvps = {self.algo: bvp}
         hrs  = {self.algo: self.estimate_hr(bvp, fs)}
-        return hrs, bvps, selected
+        return hrs, bvps
 
     @staticmethod
     def estimate_hr(bvp, fs):
         """
-        Estimates heart rate from a filtered BVP signal via FFT peak detection.
+        Estimates heart rate from a filtered BVP signal via peak detection.
 
         Parameters
         ----------
@@ -211,12 +181,20 @@ class FaceProcessor:
 
         Returns
         -------
-        float  Heart rate in BPM.
+        float  Heart rate in BPM, or nan if insufficient peaks.
         """
-        freqs = np.fft.rfftfreq(len(bvp), d=1 / fs)
-        power = np.abs(np.fft.rfft(bvp)) ** 2
-        band  = (freqs >= 0.75) & (freqs <= 2.0)
-        return freqs[band][np.argmax(power[band])] * 60
+        if len(bvp) < int(2 * fs):
+            return np.nan
+        peaks, _ = find_peaks(bvp,
+                               distance=max(1, int(0.5 * fs)),
+                               prominence=np.std(bvp) * 0.25)
+        if len(peaks) < 3:
+            return np.nan
+        rri = np.diff(peaks) / fs
+        rri = rri[(rri > 0.4) & (rri < 1.5)]
+        if len(rri) < 2:
+            return np.nan
+        return 60.0 / np.mean(rri)
 
     @staticmethod
     def apply_filters(bvp, fs):
@@ -244,30 +222,12 @@ class FaceProcessor:
         b, a  = sp_signal.butter(2, [lo, hi], btype='bandpass')
         return sp_signal.filtfilt(b, a, bvp.astype(np.double))
 
-    def _compute_dmrs_background(self):
-        """Runs DMRS region selection in a background thread (every 90 frames)."""
-        fs     = self.get_fps()
-        window = max(int(30 * fs), 64)
-        if len(self.region_rgb) < window:
-            with self._hr_lock:
-                self._hr_computing = False
-            return
-        region_win   = np.array(self.region_rgb[-window:])
-        green_win    = region_win[:, :, 1]
-        # A cell is valid for DMRS if it had enough skin pixels in ≥50% of frames
-        valid_arrays = np.array(self.region_valid[-window:])   # (window, K)
-        valid_mask   = valid_arrays.mean(axis=0) >= 0.5        # (K,) bool
-        selected     = dmrs_select(green_win, fs, r_max=R_MAX, valid_mask=valid_mask)
-        with self._hr_lock:
-            self._selected_regions = selected
-            self._hr_computing = False
-
     def _compute_hr_background(self):
         """Runs HR estimation in a background thread and stores the result."""
         result = self._estimate_hr_realtime()
         with self._hr_lock:
             if result is not None:
-                raw, bvps, selected = result
+                raw, bvps = result
                 if self.hr_ema is None:
                     self.hr_ema = raw
                 else:
@@ -347,19 +307,11 @@ class FaceProcessor:
                 annotated = self.process_frame(frame)
 
                 n_frames = len(self.rgb_signal)
-                if n_frames > 0 and not self._hr_computing:
-                    if self.roi == ROI_MULTI and n_frames % 90 == 0:
-                        # DMRS every 90 frames — updates selected regions
-                        with self._hr_lock:
-                            self._hr_computing = True
-                        threading.Thread(target=self._compute_dmrs_background,
-                                         daemon=True).start()
-                    elif n_frames % 30 == 0:
-                        # HR every 30 frames
-                        with self._hr_lock:
-                            self._hr_computing = True
-                        threading.Thread(target=self._compute_hr_background,
-                                         daemon=True).start()
+                if n_frames > 0 and not self._hr_computing and n_frames % 30 == 0:
+                    with self._hr_lock:
+                        self._hr_computing = True
+                    threading.Thread(target=self._compute_hr_background,
+                                     daemon=True).start()
 
                 # HR print to terminal
                 face_str = "YES" if self._last_face_detected else "NO"

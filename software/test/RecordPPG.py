@@ -29,7 +29,6 @@ sys.path.insert(0, parent_dir)
 
 from DataHandler import WebcamHandler, CameraHandler, IMUHandler
 from Processor import FaceProcessor
-from ROIExtraction import ROI_FOREHEAD, ROI_FACE, ROI_MULTI
 
 XIAO_IP     = "http://192.168.4.1"
 SERIAL_PORT = 'COM3'
@@ -52,11 +51,6 @@ def main():
     if algo == "LMS" and imu is None:
         print("LMS requires drone IMU. Falling back to GREEN.")
         algo = "GREEN"
-
-    print("\nSelect ROI:  1=Forehead  2=Full face  3=Multi-region")
-    roi = {1: ROI_FOREHEAD, 2: ROI_FACE, 3: ROI_MULTI}.get(
-        int(input("Option [1-3]: ").strip() or "2"), ROI_FACE
-    )
 
     # --- serial (hardware PPG) ---
     try:
@@ -92,7 +86,7 @@ def main():
     if ser:
         threading.Thread(target=read_serial, daemon=True).start()
 
-    proc = FaceProcessor(cam, imu=imu, algo=algo, roi=roi)
+    proc = FaceProcessor(cam, imu=imu, algo=algo)
 
     bvp_by_frame = {}
     start_time   = time.time()
