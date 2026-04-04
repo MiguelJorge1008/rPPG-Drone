@@ -8,25 +8,27 @@ Video acquisition and face detection software for rPPG (remote Photoplethysmogra
 
 ```
 software/
-├── main.py                      # Entry point: selects mode, source, algorithm, ROI and display
+├── main.py                      # Entry point: selects mode, source, algorithm and display
 ├── DataHandler.py               # CameraHandler, WebcamHandler, IMUHandler
-├── Processor.py                 # FaceProcessor: ROI, RGB extraction, real-time HR (rPPG)
+├── Processor.py                 # FaceProcessor: forehead ROI, RGB extraction, real-time HR (rPPG)
 ├── RespiratoryProcessor.py      # RespiratoryProcessor: pose tracking, real-time RR
-├── ROIExtraction.py             # ROI modes, face polygon, grid extraction, DMRS
+├── ROIExtraction.py             # Forehead polygon (4 landmarks) with EMA smoothing
 ├── algoritmos/
 │   ├── green.py                 # GREEN algorithm (Verkruysse 2008)
 │   ├── omit.py                  # OMIT algorithm (Casado 2023)
 │   ├── pos_wang.py              # POS algorithm (Wang et al. 2017)
 │   └── adaptive_lms.py          # Adaptive NLMS filter with IMU (drone only)
 └── test/
-    ├── PPG2csv.py               # Record rPPG + hardware PPG simultaneously → CSV
-    ├── Resp2csv.py              # Record RR + hardware respiration sensor → CSV
-    ├── PlotData.py              # Plot signals and metrics over time per recording
-    ├── Evaluate.py              # Offline evaluation: MAE, RMSE, Bias, PCC from CSV
-    ├── RunTest.py               # Runs the full pipeline: PlotData → Evaluate
+    ├── RecordPPG.py             # Record rPPG + hardware PPG simultaneously → CSV
+    ├── RecordResp.py            # Record RR + hardware respiration sensor → CSV
+    ├── ComputeMetrics.py        # Post-process raw CSVs → metrics CSVs in data_processed/
+    ├── Evaluate.py              # Offline evaluation: MAE±SD per algorithm; plots to results/
+    ├── RunTest.py               # Runs the full pipeline: ComputeMetrics → Evaluate
     ├── Arduino/
     │   └── SensorIntegration.ino    # Arduino: PPG + respiration sensors → Serial (115200 baud)
-    └── data/                    # CSV recordings (output of PPG2csv / Resp2csv)
+    ├── data/                    # Raw CSV recordings (timestamp + signal only)
+    ├── data_processed/          # Processed CSVs with computed metrics
+    └── results/                 # Evaluation plots (PNG)
 ```
 
 ---
@@ -36,14 +38,11 @@ software/
 ```
 Frame (camera / webcam)
   → MediaPipe FaceMesh (face detection)
-  → ROI extraction (FOREHEAD / FACE / MULTI)
-       FOREHEAD : 4 landmarks → forehead polygon → mean RGB/frame
-       FACE     : 36 landmarks → face oval polygon → mean RGB/frame
-       MULTI    : face oval → 9×9 grid → DMRS region selection → mean RGB/frame
+  → Forehead ROI (4 landmarks → forehead polygon → mean RGB/frame)
   → rgb_signal (N, 3)
   → [GREEN / OMIT / POS_WANG / LMS]  →  raw BVP (N,)
   → apply_filters  →  filtered BVP (N,)
-  → estimate_hr  →  BPM  (FFT, range 45–240 bpm)
+  → estimate_hr  →  BPM  (find_peaks, 30 s window)
 ```
 
 ---
@@ -52,7 +51,7 @@ Frame (camera / webcam)
 
 ### `main.py`
 
-Entry point. Prompts the user for the operating mode, display preference, video source, rPPG algorithm and ROI mode, then starts the main loop.
+Entry point. Prompts the user for the operating mode, display preference, video source and rPPG algorithm, then starts the main loop.
 
 **Startup prompts (in order):**
 
@@ -62,13 +61,10 @@ Entry point. Prompts the user for the operating mode, display preference, video 
 | Display | `1` Yes · `2` No | Show matplotlib graphs + camera window, or terminal only |
 | Source | `A` Drone · `B` Webcam | MJPEG stream or local webcam |
 | Algorithm | `1`–`4` *(rPPG only)* | GREEN, OMIT, POS_WANG, LMS |
-| ROI | `1`–`3` *(rPPG only)* | FOREHEAD, FACE, MULTI |
 
 - **Display mode 2 (terminal only)** skips all `matplotlib` and `cv2.imshow` calls, significantly increasing FPS by eliminating rendering overhead.
 - **Source A — Drone:** `CameraHandler` (MJPEG stream) + `IMUHandler` (polling `/imu`, rPPG mode only); fixed IP `http://192.168.4.1`
 - **Source B — Webcam:** `WebcamHandler` (local OpenCV VideoCapture)
-- **Available algorithms (rPPG only):** GREEN, OMIT, POS_WANG, LMS (LMS only in drone mode)
-- **ROI modes (rPPG only):** FOREHEAD, FACE, MULTI
 
 ---
 
@@ -113,66 +109,41 @@ JSON fields: `ax, ay, az` (g), `gx, gy, gz` (°/s), `bat` (mV), `fc_state`.
 
 ### `ROIExtraction.py`
 
-All ROI logic: landmark indices, polygon extraction, grid extraction and DMRS region selection.
+Forehead ROI polygon extraction with EMA smoothing.
 
-**ROI mode constants:**
+**Constant:**
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `ROI_FOREHEAD` | `"FOREHEAD"` | 4-landmark forehead quadrilateral (original) |
-| `ROI_FACE` | `"FACE"` | 36-landmark face oval contour |
-| `ROI_MULTI` | `"MULTI"` | Face oval + 9×9 grid + DMRS selection (Face2PPG) |
+| `ROI_FOREHEAD` | `"FOREHEAD"` | 4-landmark forehead quadrilateral |
 
 **Landmark indices:**
 
-- `FOREHEAD_ROI = [103, 332, 296, 66]` — 4 forehead landmarks
-- `FACE_OVAL` — 36 ordered landmarks tracing the face contour
+- `FOREHEAD_ROI = [103, 332, 296, 66]` — 4 forehead landmarks (MediaPipe FaceMesh)
 
-**Functions:**
+**Function:**
 
 | Function | Description |
 |----------|-------------|
-| `get_roi_polygon(landmarks, w, h, ema, alpha, roi_mode)` | Returns face polygon with EMA smoothing; dispatches to FOREHEAD or FACE_OVAL indices |
-| `extract_grid_rgb(rgb, face_mask, poly, h, w, face_mean)` | Divides face bounding box into GRID_N×GRID_N cells; returns mean RGB per cell |
-| `draw_grid_overlay(frame, poly, h, w, selected_indices)` | Draws grid on frame; selected regions shown in green |
-| `compute_kfd(signal)` | Katz Fractal Dimension — measures signal complexity |
-| `compute_dfa(signal)` | Detrended Fluctuation Analysis — measures long-range correlations |
-| `dmrs_select(region_signals, fs, r_max, kfd_thresh)` | Dynamic Multi-Region Selection: variance → KFD → spectral SNR ranking |
-
-**DMRS pipeline (Face2PPG, Casado & López 2023):**
-
-1. Discard regions with zero variance
-2. KFD filter: keep regions with `KFD_i / KFD_global >= 0.85`
-3. Rank by SNR in HR band [0.75–4.0 Hz] → top `R_MAX=32` regions
-
-> DFA omitted from real-time DMRS for performance. DMRS runs in a background thread every 90 frames; HR estimation uses the cached selected regions every 30 frames.
-
-**Grid parameters:**
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `GRID_N` | 9 | Grid rows/columns (9×9 = 81 regions) |
-| `R_MAX` | 32 | Max regions selected by DMRS |
-| `MIN_REGION_PIXELS` | 5 | Min pixels inside face mask for a cell to be valid |
+| `get_roi_polygon(landmarks, w, h, ema, alpha)` | Returns forehead polygon with EMA smoothing (`alpha=0.35`) |
 
 ---
 
 ### `Processor.py`
 
-Processes frames with MediaPipe FaceMesh, extracts the RGB signal, runs rPPG algorithms and estimates HR in real time.
+Processes frames with MediaPipe FaceMesh, extracts the forehead RGB signal, runs rPPG algorithms and estimates HR in real time.
 
 **Class: `FaceProcessor`**
 
 | Method | Description |
 |--------|-------------|
-| `__init__(camera, imu, algo, roi, display)` | Initializes FaceMesh, signal buffers, background threads; `display=False` disables all rendering |
-| `process_frame(frame)` | Resizes to 320×240, runs FaceMesh, extracts ROI RGB, draws overlay |
+| `__init__(camera, imu, algo, display)` | Initializes FaceMesh, signal buffers, background threads; `display=False` disables all rendering |
+| `process_frame(frame)` | Resizes to 320×240, runs FaceMesh, extracts forehead ROI RGB, draws overlay |
 | `get_fps(window=60)` | Estimates FPS from real timestamps; fallback 27.0 Hz |
 | `apply_filters(bvp, fs)` | Detrend + Butterworth bandpass [0.75–4.0 Hz] |
-| `estimate_hr(bvp, fs)` | Power FFT peak in [0.75–4.0 Hz] → BPM (no filtering, no windowing) |
-| `_estimate_hr_realtime()` | Computes BVP + HR on signal window; uses DMRS regions if ROI_MULTI |
+| `estimate_hr(bvp, fs)` | `find_peaks` on filtered BVP → mean RRI → BPM |
+| `_estimate_hr_realtime()` | Computes BVP + HR on last 30 s of signal |
 | `_compute_hr_background()` | Background thread: HR every 30 frames |
-| `_compute_dmrs_background()` | Background thread: DMRS region selection every 90 frames (ROI_MULTI only) |
 | `run()` | Main acquisition + display loop |
 | `stop()` | Closes FaceMesh and camera |
 
@@ -187,14 +158,13 @@ Processes frames with MediaPipe FaceMesh, extracts the RGB signal, runs rPPG alg
 
 **HR estimation (`estimate_hr`):**
 
-Power FFT over the filtered BVP signal; argmax frequency in [0.75–4.0 Hz] → BPM. No Hanning window, no additional filtering.
+`find_peaks` with `distance=0.5 s` and `prominence=0.25×std`; RRI filter [0.4–1.5 s]; HR = 60 / mean(RRI). Consistent with `ComputeMetrics.metrics_from_peaks`.
 
-**Background thread triggers:**
+**Background thread trigger:**
 
 | Trigger | Interval | Task |
 |---------|----------|------|
-| Every 30 frames | ~2 s @ 15 fps | HR estimation (lightweight) |
-| Every 90 frames | ~6 s @ 15 fps | DMRS region selection (ROI_MULTI only) |
+| Every 30 frames | ~2 s @ 15 fps | HR estimation |
 
 ---
 
@@ -208,8 +178,8 @@ Estimates respiratory rate (RR) in real time using the **Bartula (2013)** camera
 
 | Method | Description |
 |--------|-------------|
-| `__init__(camera, display)` | Initialises signal buffers, position integrator and background thread state; `display=False` disables all rendering |
-| `_init_roi_from_pose(timeout)` | Runs Pose on live frames until shoulders detected; computes chest ROI; closes Pose. Raises `RuntimeError` on timeout. |
+| `__init__(camera, display)` | Initialises signal buffers, position integrator and background thread state |
+| `_init_roi_from_pose(timeout)` | Runs Pose on live frames until shoulders detected; computes chest ROI; closes Pose |
 | `process_frame(frame)` | Extracts profile, computes shift, integrates position, detects global motion |
 | `get_fps(window=60)` | Estimates FPS from recent timestamps; fallback 25.0 Hz |
 | `_make_profile(roi_gray)` | 1D vertical profile: mean+std per row, high-pass filtered |
@@ -220,23 +190,6 @@ Estimates respiratory rate (RR) in real time using the **Bartula (2013)** camera
 | `_compute_rr_background()` | Background thread: RR every 30 frames |
 | `run()` | Calls `_init_roi_from_pose`, then main acquisition + display loop |
 | `stop()` | Stops camera and closes windows |
-
-**Startup — ROI detection:**
-
-```
-Live frames → MediaPipe Pose
-  shoulders visible (visibility > 0.5)?
-    YES → compute chest ROI from shoulder landmarks → show 1 s → close Pose → start Bartula
-    NO  → keep waiting … timeout (15 s) → RuntimeError
-```
-
-ROI boundaries derived from shoulder landmarks:
-
-| Edge | Formula |
-|------|---------|
-| Top | `shoulder_y − 10 % × shoulder_width` |
-| Bottom | `hip_y` if hips visible, else `shoulder_y + 120 % × shoulder_width` |
-| Left / Right | `shoulder edges ± 15 % × shoulder_width` |
 
 **Bartula pipeline (per frame):**
 
@@ -269,79 +222,93 @@ Frame ROI (grayscale)
 | `MIN_BREATH_S` | 1.5 s | Shortest valid breath (≈ 40 rpm) |
 | `MAX_BREATH_S` | 10.0 s | Longest valid breath (6 rpm) |
 
-> The ROI rectangle is drawn in yellow (normal) or red (global motion detected). If Pose does not detect the subject within 15 s the program raises an error — no measurement without a valid chest ROI.
-
 ---
 
 ### `test/`
 
-Hardware-synchronized recording and evaluation scripts. All recording scripts read a hardware reference sensor via Serial (Arduino at 115200 baud, `COM3`) and synchronize it with the software pipeline in real time.
+Hardware-synchronized recording and evaluation scripts.
 
 **`Arduino/SensorIntegration.ino`** — Arduino sketch that reads an analog PPG sensor (pin `A6`) and a respiration sensor (pin `A5`) and streams timestamped samples over Serial at 115200 baud.
 
 ---
 
-**`PPG2csv.py`** — Records rPPG and hardware PPG simultaneously and saves to CSV.
+**`RecordPPG.py`** — Records rPPG and hardware PPG simultaneously and saves to CSV.
 
-- **Warmup:** 60 s (no data saved); **Recording:** 60 s
-- Per frame, saves: `timestamp`, `signal_hw` (last Arduino PPG sample), `signal_sw` (last BVP value), `HR_gt`, `HR_<algo>`, `SDNN_gt`, `SDNN_<algo>`, `RMSSD_gt`, `RMSSD_<algo>`
-- **`HR_gt` computation:** 30 s backward-looking window on `signal_hw`, power FFT (no filtering), band [0.75–4.0 Hz], argmax → BPM. Identical to `Processor.estimate_hr`.
-- SDNN / RMSSD computed from `find_peaks` on the hardware signal (distance = 0.4 s)
-
-**`Resp2csv.py`** — Records respiratory rate and hardware respiration sensor simultaneously and saves to CSV.
-
-- **Warmup:** 30 s; **Recording:** 60 s
-- Per frame, saves: `timestamp`, `signal_hw` (last Arduino respiration sample), `signal_sw` (filtered camera signal), `RR_gt`, `RR_BARTULA`, `BRV_gt`, `BRV_BARTULA`
-- **`RR_gt` computation:** 30 s backward-looking window on `signal_hw`, `find_peaks` (no filtering, distance = 1.5 s, prominence = 0.25 × std), valid intervals [1.5–10 s], median → RPM. Identical to `RespiratoryProcessor._estimate_rr_from_peaks`.
+- **Warmup:** 30 s (no data saved); **Recording:** 60 s
+- Outputs to `data/`:
+  - `BVP_<ALGO>_<ts>_sw.csv` — `timestamp`, `signal_sw` (z-normalised BVP)
+  - `BVP_<ALGO>_<ts>_hw.csv` — `timestamp`, `signal_hw` (raw PPG, relative time)
+- HW signal read via Serial (Arduino, `COM3`, 115200 baud)
 
 ---
 
-**`PlotData.py`** — Generates one PNG per CSV with 3 rows: raw signals (z-score normalised), rate over time (HR or RR), and variability over time (SDNN/RMSSD or BRV).
+**`RecordResp.py`** — Records respiratory rate and hardware respiration sensor simultaneously and saves to CSV.
 
-```bash
-python PlotData.py               # all recordings in data/
-python PlotData.py --file X.csv  # single file
-```
-
-Output: `results/plots_raw/`
+- **Warmup:** 20 s; **Recording:** 60 s
+- Outputs to `data/`:
+  - `RESP_<ts>_sw.csv` — `timestamp`, `signal_sw`
+  - `RESP_<ts>_hw.csv` — `timestamp`, `signal_hw`
 
 ---
 
-**`Evaluate.py`** — Offline evaluation. Reads `HR_gt` + `HR_<algo>` (or `RR_gt` + `RR_BARTULA`) directly from each CSV and computes metrics on all valid (non-NaN) pairs.
+**`ComputeMetrics.py`** — Post-processes raw CSVs from `data/` into metric CSVs in `data_processed/`.
 
 ```bash
-python Evaluate.py               # all recordings in data/
-python Evaluate.py --file X.csv  # single file
+python ComputeMetrics.py                             # all pairs in data/
+python ComputeMetrics.py --file BVP_GREEN_X_sw.csv  # single pair
 ```
 
-**Warmup cutoff** — initial samples are discarded before metric computation and plotting:
+**rPPG processing (`process_pair`):**
+- SW: cumulative expanding window; `metrics_from_peaks` → HR, SDNN, RMSSD per timestamp
+- HW: same, with bandpass filter [0.75–4.0 Hz] applied first
+- Outputs:
+  - `BVP_<ALGO>_<ts>_sw_processed.csv` — `timestamp`, `signal_sw`, `HR_<algo>`, `SDNN_<algo>`, `RMSSD_<algo>`
+  - `BVP_<ALGO>_<ts>_hw_processed.csv` — `timestamp`, `signal_hw`, `HR_gt`, `SDNN_gt`, `RMSSD_gt`
+
+**Respiratory processing (`process_resp_pair`):**
+- SW downsampled to 25 Hz before loop (avoids O(n²) at high acquisition rates)
+- Sliding 30 s window; `resp_metrics_from_peaks` → RR, BBI per timestamp
+- Outputs:
+  - `RESP_<ts>_sw_processed.csv` — `timestamp`, `signal_sw`, `RR_BARTULA`, `BBI_BARTULA`
+  - `RESP_<ts>_hw_processed.csv` — `timestamp`, `signal_hw`, `RR_gt`, `BBI_gt`
+
+**Peak detection (`metrics_from_peaks`):**
+- `find_peaks` with `distance=0.5 s`, `prominence=0.25×std`
+- RRI filter: [0.4–1.5 s]; HR = 60 / mean(RRI); SDNN = std(RRI)×1000; RMSSD = √mean(ΔRRI²)×1000
+
+**Peak detection (`resp_metrics_from_peaks`):**
+- `find_peaks` with `distance=1.5 s`, `prominence=0.25×std`
+- BBI filter: [1.5–10.0 s]; RR = 60 / mean(BBI)
+
+---
+
+**`Evaluate.py`** — Offline evaluation. Reads processed CSVs from `data_processed/`, interpolates HW ground truth onto SW timestamps, and computes MAE±SD per algorithm.
+
+```bash
+python Evaluate.py               # all recordings in data_processed/
+python Evaluate.py --file BVP_GREEN_X_sw_processed.csv  # single file
+```
+
+**Warmup cutoff:**
 
 | Recording type | Cutoff | Reason |
 |----------------|--------|--------|
 | rPPG (HR_*) | 30 s | Matches the 30 s minimum window in `FaceProcessor._estimate_hr_realtime` |
 | Respiratory (RR_BARTULA) | 20 s | Matches `MIN_SEC = 20` in `RespiratoryProcessor` |
 
-**Metrics:** MAE ± SD, RMSE, Bias, PCC, SNR (dB, Wang 2017 narrow-window), Accuracy % — matching Face2PPG Table I format.
+**GT interpolation:** HW metrics (on HW timestamps) are linearly interpolated onto SW timestamps before computing error metrics.
 
-**SNR computation (`compute_snr`):**
-- Cardiac band [0.75–4.0 Hz], signal window ±0.10 Hz around GT frequency (Wang 2017)
-- Respiratory band [0.10–0.50 Hz], signal window ±0.05 Hz around GT frequency
-- Duration guard: ≥ 10 s for cardiac, ≥ 15 s for respiratory
+**Metrics:** MAE ± SD only.
 
-**Output — two tables:**
+**Output — three tables:**
 
-| Table | Algorithms |
-|-------|-----------|
-| Table 1 — Standard | GREEN (no IMU), OMIT, POS_WANG, BARTULA |
-| Table 2 — IMU / Motion comp | GREEN (IMU recordings), LMS |
+| Table | Content |
+|-------|---------|
+| Table 1 — HR | MAE±SD per algorithm (GREEN, OMIT, POS_WANG) |
+| Table 2 — RR | MAE±SD for BARTULA |
+| Table 3 — HRV | SDNN and RMSSD MAE±SD per algorithm |
 
-IMU recordings are detected automatically from the filename (contains `imu`).
-
-**No GT recomputation** — ground truth values are read directly from the CSV columns produced by `PPG2csv.py` / `Resp2csv.py`. This guarantees GT and algo estimates use the same computation method (both use 30 s backward windows).
-
-**Output:**
-- `results/plots_eval/<recording>_<algo>.png` — per-recording 2-row plot: rate over time + Bland-Altman; time axis shows actual recording time from the first sample (starts at warmup cutoff)
-- `results/csv_raw/summary_metrics.csv` — aggregate metrics table
+**Plots:** per-recording signal + metrics overlay (SW vs HW), cropped to 0–60 s; saved to `results/`.
 
 ---
 
@@ -351,8 +318,8 @@ IMU recordings are detected automatically from the filename (contains `imu`).
 python RunTest.py
 ```
 
-1. `PlotData.py --source raw` → `results/plots_raw/`
-2. `Evaluate.py` → prints metrics table + `results/csv_raw/summary_metrics.csv`
+1. `ComputeMetrics.py` → `data_processed/`
+2. `Evaluate.py` → prints tables + saves plots to `results/`
 
 ---
 
@@ -363,6 +330,8 @@ python RunTest.py
 | `SERIAL_PORT` | `COM3` | Serial port of the Arduino |
 | `BAUD_RATE` | `115200` | Must match `SensorIntegration.ino` |
 | `XIAO_IP` | `http://192.168.4.1` | Drone IP (ignored when using webcam) |
+| `WARMUP_S` | 30 (PPG) / 20 (Resp) | Warmup duration before recording starts |
+| `RECORD_S` | 60 | Recording duration |
 
 ---
 
@@ -464,7 +433,6 @@ The program prompts:
 2. Display: `1` graphs + camera · `2` terminal only (higher FPS)
 3. Video source: `A` (drone, `192.168.4.1`) or `B` (PC webcam)
 4. *(rPPG only)* Algorithm: `1` GREEN · `2` OMIT · `3` POS_WANG · `4` LMS
-5. *(rPPG only)* ROI mode: `1` Forehead · `2` Full face · `3` Multi-region (DMRS)
 
 Press `q` to stop.
 
@@ -472,8 +440,8 @@ Press `q` to stop.
 
 ```bash
 # Record (run from test/)
-python PPG2csv.py    # rPPG + hardware PPG → data/Recording_rPPG_*.csv
-python Resp2csv.py   # RR  + hardware resp → data/Recording_Resp_*.csv
+python RecordPPG.py    # rPPG + hardware PPG  → data/BVP_<ALGO>_<ts>_{sw,hw}.csv
+python RecordResp.py   # RR  + hardware resp  → data/RESP_<ts>_{sw,hw}.csv
 
 # Evaluate all recordings
 python RunTest.py
@@ -485,19 +453,16 @@ python RunTest.py
 
 - [x] MJPEG stream from XIAO ESP32 camera
 - [x] Face detection with MediaPipe FaceMesh (468 landmarks)
-- [x] ROI modes: Forehead (4 landmarks) / Face oval (36 landmarks) / Multi-region DMRS
-- [x] 9×9 grid extraction with DMRS region selection (Face2PPG)
-- [x] Grid overlay visualisation in camera window
+- [x] Forehead ROI (4 landmarks, EMA-smoothed polygon)
 - [x] GREEN, OMIT, POS_WANG and LMS algorithms
 - [x] Filters: detrend + Butterworth bandpass [0.75–4.0 Hz]
-- [x] Real-time HR via power FFT (every 30 frames, 30 s window)
+- [x] Real-time HR via find_peaks (every 30 frames, 30 s window)
 - [x] LMS motion artifact cancellation with IMU
 - [x] Respiratory rate via MediaPipe Pose (thorax movement, 0.1–0.5 Hz)
 - [x] Display toggle: full visual mode vs terminal-only (improved FPS)
-- [x] Hardware-synchronized recording scripts (PPG2csv, Resp2csv)
-- [x] Signal plot script (PlotData) — z-normalised signals + rate + variability over time
-- [x] Evaluation script (Evaluate) — MAE±SD, RMSE, Bias, PCC; two aggregate tables
-- [x] GT computation aligned with processor: 30 s backward window, power FFT (HR) / find_peaks (RR)
-- [ ] Peak detection → RR intervals → HRV (SDNN, RMSSD, LF, HF, LF/HF)
+- [x] Hardware-synchronized recording scripts (RecordPPG, RecordResp)
+- [x] ComputeMetrics: peak-based HR/HRV/RR metrics → data_processed/
+- [x] Evaluate: MAE±SD per algorithm, GT interpolation, plots to results/
+- [x] Consistent peak-based HR estimation across real-time and offline evaluation
 - [ ] IMU-based motion compensation for GREEN / OMIT / POS
 - [ ] Clinical validation against oximeter ground truth
