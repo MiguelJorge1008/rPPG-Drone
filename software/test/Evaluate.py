@@ -4,6 +4,10 @@ evaluate.py — Evaluate rPPG / respiration recordings.
 Reads HR_gt + HR_<algo>  (or RR_gt + RR_BARTULA) directly from each CSV
 and computes:  MAE ± SD,  RMSE,  Bias,  PCC
 
+Also evaluates variability metrics when present in the CSV:
+  - rPPG:  SDNN_gt / SDNN_<algo>  and  RMSSD_gt / RMSSD_<algo>  (ms)
+  - Resp:  BRV_gt  / BRV_BARTULA                                  (ms)
+
 GT columns must already be present in the CSV — run reprocess_gt.py first
 if the recordings were made before the GT computation was updated.
 
@@ -21,6 +25,7 @@ from scipy.stats import pearsonr
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from PlotData import plot_rppg as _plot_data_rppg, plot_resp as _plot_data_resp
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -30,8 +35,11 @@ RECORDINGS  = os.path.join(SCRIPT_DIR, "data")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 CSV_OUT     = os.path.join(RESULTS_DIR, "csv_raw")
 PLOTS_EVAL  = os.path.join(RESULTS_DIR, "plots_eval")
-ACCURACY_BPM_THRESHOLD = 5    # ±5 bpm  — standard rPPG threshold (cardiac)
-ACCURACY_RPM_THRESHOLD = 1    # ±1 rpm  — Bartula 2013 threshold (respiratory)
+ACCURACY_BPM_THRESHOLD  = 5    # ±5 bpm  — standard rPPG threshold (cardiac)
+ACCURACY_RPM_THRESHOLD  = 1    # ±1 rpm  — Bartula 2013 threshold (respiratory)
+ACCURACY_SDNN_THRESHOLD = 10   # ±10 ms  — clinically meaningful SDNN change
+ACCURACY_RMSSD_THRESHOLD= 10   # ±10 ms
+ACCURACY_BBI_THRESHOLD  = 0.5  # ±0.5 s — breath interval accuracy
 
 
 # ---------------------------------------------------------------------------
@@ -178,13 +186,47 @@ def evaluate_rppg_file(df, fname, t0):
         m['snr_mean']     = snr_val
         m['accuracy_pct'] = acc_val
         m.update(file=fname, algo=algo, metric='HR', unit='BPM')
-        plot_eval_rppg(df, fname, algo, algo_col, m, t0)
         results.append(m)
         snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
         acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
         print(f"  HR {algo}: n={m['n']}  MAE={m['mae']:.2f}±{m['mae_sd']:.2f}  "
               f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}  "
               f"SNR={snr_s}  Acc={acc_s}")
+
+        # --- SDNN ---
+        sdnn_gt_col  = 'SDNN_gt'
+        sdnn_est_col = f'SDNN_{algo}'
+        if sdnn_gt_col in df.columns and sdnn_est_col in df.columns:
+            ms = compute_metrics(df[sdnn_gt_col].values, df[sdnn_est_col].values)
+            vm = np.isfinite(df[sdnn_gt_col].values) & np.isfinite(df[sdnn_est_col].values)
+            acc_sdnn = float(np.mean(np.abs(df[sdnn_est_col].values[vm] - df[sdnn_gt_col].values[vm])
+                                     <= ACCURACY_SDNN_THRESHOLD) * 100.0) if vm.sum() >= 3 else np.nan
+            ms['snr_mean'] = np.nan
+            ms['accuracy_pct'] = acc_sdnn
+            ms.update(file=fname, algo=algo, metric='SDNN', unit='ms')
+            acc_s2 = f"{acc_sdnn:.1f}%" if pd.notna(acc_sdnn) else "N/A"
+            print(f"  SDNN {algo}: n={ms['n']}  MAE={ms['mae']:.2f}±{ms['mae_sd']:.2f}  "
+                  f"RMSE={ms['rmse']:.2f}  Bias={ms['bias']:+.2f}  PCC={ms['r']:.3f}  "
+                  f"Acc(±10ms)={acc_s2}")
+            results.append(ms)
+
+        # --- RMSSD ---
+        rmssd_gt_col  = 'RMSSD_gt'
+        rmssd_est_col = f'RMSSD_{algo}'
+        if rmssd_gt_col in df.columns and rmssd_est_col in df.columns:
+            mr = compute_metrics(df[rmssd_gt_col].values, df[rmssd_est_col].values)
+            vm = np.isfinite(df[rmssd_gt_col].values) & np.isfinite(df[rmssd_est_col].values)
+            acc_rmssd = float(np.mean(np.abs(df[rmssd_est_col].values[vm] - df[rmssd_gt_col].values[vm])
+                                      <= ACCURACY_RMSSD_THRESHOLD) * 100.0) if vm.sum() >= 3 else np.nan
+            mr['snr_mean'] = np.nan
+            mr['accuracy_pct'] = acc_rmssd
+            mr.update(file=fname, algo=algo, metric='RMSSD', unit='ms')
+            acc_s3 = f"{acc_rmssd:.1f}%" if pd.notna(acc_rmssd) else "N/A"
+            print(f"  RMSSD {algo}: n={mr['n']}  MAE={mr['mae']:.2f}±{mr['mae_sd']:.2f}  "
+                  f"RMSE={mr['rmse']:.2f}  Bias={mr['bias']:+.2f}  PCC={mr['r']:.3f}  "
+                  f"Acc(±10ms)={acc_s3}")
+            results.append(mr)
+
     return results
 
 
@@ -210,175 +252,30 @@ def evaluate_resp_file(df, fname, t0):
     m['snr_mean']     = snr_val
     m['accuracy_pct'] = acc_val
     m.update(file=fname, algo='BARTULA', metric='RR', unit='RPM')
-    plot_eval_resp(df, fname, m, t0)
     snr_s = f"{snr_val:.2f}dB" if pd.notna(snr_val) else "N/A"
     acc_s = f"{acc_val:.1f}%"  if pd.notna(acc_val)  else "N/A"
     print(f"  RR BARTULA: n={m['n']}  MAE={m['mae']:.2f}±{m['mae_sd']:.2f}  "
           f"RMSE={m['rmse']:.2f}  Bias={m['bias']:+.2f}  PCC={m['r']:.3f}  "
           f"SNR={snr_s}  Acc={acc_s}")
-    return [m]
 
+    results = [m]
 
-def plot_eval_rppg(df, fname, algo, algo_col, metrics, t0):
-    """Generate a 2-row evaluation PNG for one recording × algorithm pair.
+    # --- BBI ---
+    if 'BBI_gt' in df.columns and 'BBI_BARTULA' in df.columns:
+        mb = compute_metrics(df['BBI_gt'].values, df['BBI_BARTULA'].values)
+        vm = np.isfinite(df['BBI_gt'].values) & np.isfinite(df['BBI_BARTULA'].values)
+        acc_bbi = float(np.mean(np.abs(df['BBI_BARTULA'].values[vm] - df['BBI_gt'].values[vm])
+                                <= ACCURACY_BBI_THRESHOLD) * 100.0) if vm.sum() >= 3 else np.nan
+        mb['snr_mean'] = np.nan
+        mb['accuracy_pct'] = acc_bbi
+        mb.update(file=fname, algo='BARTULA', metric='BBI', unit='s')
+        acc_sb = f"{acc_bbi:.1f}%" if pd.notna(acc_bbi) else "N/A"
+        print(f"  BBI BARTULA: n={mb['n']}  MAE={mb['mae']:.2f}±{mb['mae_sd']:.2f}  "
+              f"RMSE={mb['rmse']:.2f}  Bias={mb['bias']:+.2f}  PCC={mb['r']:.3f}  "
+              f"Acc(±0.5s)={acc_sb}")
+        results.append(mb)
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Full recording DataFrame.
-    fname : str
-        CSV filename (used for title and output PNG stem).
-    algo : str
-        Algorithm name, e.g. "GREEN".
-    algo_col : str
-        Column name in df, e.g. "HR_GREEN".
-    metrics : dict
-        Result dict with keys: mae, mae_sd, rmse, bias, r, snr_mean, accuracy_pct.
-    t0 : float
-        Timestamp of the first row of the original (unfiltered) recording.
-    """
-    t   = df['timestamp'].values.astype(float)
-    t   = t - t0
-    gt  = df['HR_gt'].values.astype(float)
-    est = df[algo_col].values.astype(float)
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
-    fig.suptitle(f"{fname}  [{algo}]", fontsize=11, fontweight='bold')
-
-    # --- Row 1: BPM over time ---
-    ax1.plot(t, gt,  color='red',   lw=1.0, linestyle='--', label='HR_gt')
-    ax1.plot(t, est, color='green', lw=1.0, linestyle='-',  label=f'HR_{algo}')
-    ax1.set_ylabel('HR (bpm)')
-    ax1.set_xlabel('Time (s)')
-    ax1.set_title('Heart Rate over Time')
-    ax1.legend(fontsize=8, loc='upper right')
-    ax1.grid(True, alpha=0.3)
-
-    # --- Row 2: Bland-Altman ---
-    mask = np.isfinite(gt) & np.isfinite(est)
-    if mask.sum() < 3 or not pd.notna(metrics.get('bias')):
-        ax2.text(0.5, 0.5, 'Insufficient data', ha='center', va='center',
-                 transform=ax2.transAxes, fontsize=12, color='gray')
-        ax2.set_title('Bland-Altman — Insufficient data')
-    else:
-        means = (gt[mask] + est[mask]) / 2.0
-        diffs = est[mask] - gt[mask]
-        bias  = np.mean(diffs)
-        sd    = np.std(diffs, ddof=1)
-        loa_u = bias + 1.96 * sd
-        loa_l = bias - 1.96 * sd
-        ax2.scatter(means, diffs, s=12, alpha=0.6, color='steelblue')
-        ax2.axhline(bias,  color='red',    lw=1.5, linestyle='-',
-                    label=f'Bias={bias:+.2f}')
-        ax2.axhline(loa_u, color='orange', lw=1.0, linestyle='--',
-                    label=f'+1.96SD={loa_u:+.2f}')
-        ax2.axhline(loa_l, color='orange', lw=1.0, linestyle='--',
-                    label=f'\u22121.96SD={loa_l:+.2f}')
-        ax2.axhline(0.0,   color='black',  lw=0.5, linestyle=':')
-        ax2.set_xlabel('Mean of GT and Estimated (bpm)')
-        ax2.set_ylabel('Estimated \u2212 GT (bpm)')
-        ax2.set_title(f'Bland-Altman \u2014 {algo}')
-        ax2.legend(fontsize=7, loc='upper right')
-        ax2.grid(True, alpha=0.3)
-
-    # --- Metrics text box ---
-    snr_s = f"{metrics['snr_mean']:.2f} dB" if pd.notna(metrics.get('snr_mean')) else 'N/A'
-    acc_s = f"{metrics['accuracy_pct']:.1f}%" if pd.notna(metrics.get('accuracy_pct')) else 'N/A'
-    mae_s = f"{metrics['mae']:.2f}" if pd.notna(metrics.get('mae')) else 'N/A'
-    txt = (f"MAE={mae_s}\u00b1{metrics['mae_sd']:.2f}  RMSE={metrics['rmse']:.2f}  "
-           f"Bias={metrics['bias']:+.2f}\nPCC={metrics['r']:.3f}  "
-           f"SNR={snr_s}  Acc={acc_s}")
-    ax1.text(0.99, 0.02, txt, ha='right', va='bottom',
-             transform=ax1.transAxes, fontsize=7.5,
-             bbox=dict(facecolor='white', alpha=0.7, edgecolor='gray', boxstyle='round'))
-
-    # --- Save ---
-    os.makedirs(PLOTS_EVAL, exist_ok=True)
-    stem    = fname.replace('.csv', '')
-    outpath = os.path.join(PLOTS_EVAL, f"{stem}_{algo}.png")
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=100, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved plot: {os.path.basename(outpath)}")
-
-
-def plot_eval_resp(df, fname, metrics, t0):
-    """Generate a 2-row evaluation PNG for a respiratory recording.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Full recording DataFrame with ``RR_gt``, ``RR_BARTULA``, ``timestamp``.
-    fname : str
-        CSV filename (used for title and output PNG stem).
-    metrics : dict
-        Result dict with keys: mae, mae_sd, rmse, bias, r, snr_mean, accuracy_pct.
-    t0 : float
-        Timestamp of the first row of the original (unfiltered) recording.
-    """
-    t   = df['timestamp'].values.astype(float)
-    t   = t - t0
-    gt  = df['RR_gt'].values.astype(float)
-    est = df['RR_BARTULA'].values.astype(float)
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
-    fig.suptitle(f"{fname}  [BARTULA]", fontsize=11, fontweight='bold')
-
-    # --- Row 1: RR over time ---
-    ax1.plot(t, gt,  color='red',  lw=1.0, linestyle='--', label='RR_gt')
-    ax1.plot(t, est, color='blue', lw=1.0, linestyle='-',  label='RR_BARTULA')
-    ax1.set_ylabel('RR (rpm)')
-    ax1.set_xlabel('Time (s)')
-    ax1.set_title('Respiratory Rate over Time')
-    ax1.legend(fontsize=8, loc='upper right')
-    ax1.grid(True, alpha=0.3)
-
-    # --- Row 2: Bland-Altman ---
-    mask = np.isfinite(gt) & np.isfinite(est)
-    if mask.sum() < 3 or not pd.notna(metrics.get('bias')):
-        ax2.text(0.5, 0.5, 'Insufficient data', ha='center', va='center',
-                 transform=ax2.transAxes, fontsize=12, color='gray')
-        ax2.set_title('Bland-Altman — Insufficient data')
-    else:
-        means = (gt[mask] + est[mask]) / 2.0
-        diffs = est[mask] - gt[mask]
-        bias  = np.mean(diffs)
-        sd    = np.std(diffs, ddof=1)
-        loa_u = bias + 1.96 * sd
-        loa_l = bias - 1.96 * sd
-        ax2.scatter(means, diffs, s=12, alpha=0.6, color='steelblue')
-        ax2.axhline(bias,  color='red',    lw=1.5, linestyle='-',
-                    label=f'Bias={bias:+.2f}')
-        ax2.axhline(loa_u, color='orange', lw=1.0, linestyle='--',
-                    label=f'+1.96SD={loa_u:+.2f}')
-        ax2.axhline(loa_l, color='orange', lw=1.0, linestyle='--',
-                    label=f'\u22121.96SD={loa_l:+.2f}')
-        ax2.axhline(0.0,   color='black',  lw=0.5, linestyle=':')
-        ax2.set_xlabel('Mean of GT and Estimated (rpm)')
-        ax2.set_ylabel('Estimated \u2212 GT (rpm)')
-        ax2.set_title('Bland-Altman \u2014 BARTULA')
-        ax2.legend(fontsize=7, loc='upper right')
-        ax2.grid(True, alpha=0.3)
-
-    # --- Metrics text box ---
-    snr_s = f"{metrics['snr_mean']:.2f} dB" if pd.notna(metrics.get('snr_mean')) else 'N/A'
-    acc_s = f"{metrics['accuracy_pct']:.1f}%" if pd.notna(metrics.get('accuracy_pct')) else 'N/A'
-    mae_s = f"{metrics['mae']:.2f}" if pd.notna(metrics.get('mae')) else 'N/A'
-    txt = (f"MAE={mae_s}\u00b1{metrics['mae_sd']:.2f}  RMSE={metrics['rmse']:.2f}  "
-           f"Bias={metrics['bias']:+.2f}\nPCC={metrics['r']:.3f}  "
-           f"SNR={snr_s}  Acc(\u00b11rpm)={acc_s}")
-    ax1.text(0.99, 0.02, txt, ha='right', va='bottom',
-             transform=ax1.transAxes, fontsize=7.5,
-             bbox=dict(facecolor='white', alpha=0.7, edgecolor='gray', boxstyle='round'))
-
-    # --- Save ---
-    os.makedirs(PLOTS_EVAL, exist_ok=True)
-    stem    = fname.replace('.csv', '')
-    outpath = os.path.join(PLOTS_EVAL, f"{stem}_BARTULA.png")
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=100, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved plot: {os.path.basename(outpath)}")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -423,10 +320,10 @@ def _print_agg_table(title, rows):
 
 
 def print_summary(all_results):
-    print("\n" + "=" * 125)
-    print(f"{'FILE':<45} {'ALGO':<12} {'M':<3} {'N':>5}  "
+    print("\n" + "=" * 130)
+    print(f"{'FILE':<45} {'ALGO':<12} {'METRIC':<6} {'N':>5}  "
           f"{'MAE±SD':>16}  {'RMSE':>6}  {'BIAS':>7}  {'PCC':>6}  {'SNR':>8}  {'Acc%':>6}")
-    print("=" * 125)
+    print("=" * 130)
 
     for m in all_results:
         fname_short = m['file'][:43] if len(m['file']) > 43 else m['file']
@@ -437,7 +334,7 @@ def print_summary(all_results):
         r_s    = f"{m['r']:.3f}"                      if pd.notna(m['r'])    else "N/A"
         snr_s  = f"{m['snr_mean']:.2f}dB"             if pd.notna(m.get('snr_mean'))     else "N/A"
         acc_s  = f"{m['accuracy_pct']:.1f}%"          if pd.notna(m.get('accuracy_pct')) else "N/A"
-        print(f"{fname_short:<45} {m['algo']:<12} {m['metric']:<3} {int(m['n']):>5}  "
+        print(f"{fname_short:<45} {m['algo']:<12} {m['metric']:<6} {int(m['n']):>5}  "
               f"{mae_s:>13}{unit[:3]}  {rmse_s:>6}  {bias_s:>7}  {r_s:>6}  "
               f"{snr_s:>8}  {acc_s:>6}")
 
@@ -457,16 +354,27 @@ def print_summary(all_results):
         return _agg_row(label, unit, sub)
 
     t1_rows = [
-        agg('GREEN',   'HR', imu=False),
+        agg('GREEN',   'HR',    imu=False),
+        agg('GREEN',   'SDNN',  imu=False),
+        agg('GREEN',   'RMSSD', imu=False),
         agg('OMIT',    'HR'),
+        agg('OMIT',    'SDNN'),
+        agg('OMIT',    'RMSSD'),
         agg('POS_WANG','HR'),
+        agg('POS_WANG','SDNN'),
+        agg('POS_WANG','RMSSD'),
         agg('BARTULA', 'RR'),
+        agg('BARTULA', 'BBI'),
     ]
     t1_rows = [r for r in t1_rows if r is not None]
 
     t2_rows = [
-        agg('GREEN',   'HR', imu=True),
+        agg('GREEN',   'HR',    imu=True),
+        agg('GREEN',   'SDNN',  imu=True),
+        agg('GREEN',   'RMSSD', imu=True),
         agg('LMS',     'HR'),
+        agg('LMS',     'SDNN'),
+        agg('LMS',     'RMSSD'),
     ]
     t2_rows = [r for r in t2_rows if r is not None]
 
@@ -495,7 +403,8 @@ def main():
     args = parser.parse_args()
 
     csv_files = [args.file] if args.file else sorted(
-        f for f in os.listdir(RECORDINGS) if f.endswith('.csv')
+        f for f in os.listdir(RECORDINGS)
+        if f.endswith('.csv') and not f.endswith('_hw.csv')
     )
 
     if not csv_files:
@@ -530,8 +439,10 @@ def main():
 
         if is_resp and not is_rppg:
             results = evaluate_resp_file(df, fname, t0)
+            _plot_data_resp(df, fname, PLOTS_EVAL)
         elif is_rppg:
             results = evaluate_rppg_file(df, fname, t0)
+            _plot_data_rppg(df, fname, PLOTS_EVAL)
         else:
             print(f"  [SKIP] Unknown format")
             continue

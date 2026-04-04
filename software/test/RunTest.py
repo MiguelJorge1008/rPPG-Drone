@@ -1,7 +1,7 @@
 """
 RunTest.py — Runs the full validation pipeline in order:
-  1. PlotData   → results/plots_raw/
-  2. Evaluate   → results/csv_raw/
+  1. ComputeMetrics → adds HR/SDNN/RMSSD columns to BVP _sw.csv files
+  2. Evaluate       → results/plots_eval/  (metrics + PlotData plots)
 """
 
 import os
@@ -20,7 +20,7 @@ def run(script, *args):
         print(f"[ERROR] {script} failed.")
         sys.exit(1)
 
-run("PlotData.py", "--source", "raw")
+run("ComputeMetrics.py")
 run("Evaluate.py")
 
 print("\nAll done.")

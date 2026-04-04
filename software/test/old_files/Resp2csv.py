@@ -102,8 +102,8 @@ class RecordRespPlotter:
         
         current_hw_rpm = np.nan
         current_sw_rpm = np.nan
-        current_hw_brv = np.nan
-        current_sw_brv = np.nan
+        current_hw_bbi = np.nan
+        current_sw_bbi = np.nan
         filt_sw = []
         
         try:
@@ -187,9 +187,9 @@ class RecordRespPlotter:
                                     rr_val = 60.0 / np.median(bb_intervals)
                                     if 6.0 <= rr_val <= 60.0:
                                         current_hw_rpm = rr_val
-                                        current_hw_brv = np.std(bb_intervals) * 1000
+                                        current_hw_bbi = bb_intervals[-1]
                                         if self.display:
-                                            self.txt_hw.set_text(f"RPM: {current_hw_rpm:.1f} | BRV: {current_hw_brv:.0f} ms")
+                                            self.txt_hw.set_text(f"RPM: {current_hw_rpm:.1f} | BBI: {current_hw_bbi:.2f} s")
 
                     # 2. SOFTWARE — use time x-axis aligned to DISPLAY_SECS
                     if n_frames > 64:
@@ -212,12 +212,12 @@ class RecordRespPlotter:
                             sw_peaks, _ = find_peaks(filt_sw, distance=int(1.5 * fs), prominence=np.std(filt_sw) * 0.25)
                             if len(sw_peaks) >= 2:
                                 bb_sw = np.diff(sw_peaks) / fs
-                                current_sw_brv = np.std(bb_sw) * 1000
+                                current_sw_bbi = float(bb_sw[-1])
 
                             if self.proc.rr_estimate is not None:
                                 current_sw_rpm = self.proc.rr_estimate
                                 if self.display:
-                                    self.txt_sw.set_text(f"RPM: {current_sw_rpm:.1f} | BRV: {current_sw_brv:.0f} ms")
+                                    self.txt_sw.set_text(f"RPM: {current_sw_rpm:.1f} | BBI: {current_sw_bbi:.2f} s")
 
                         except Exception:
                             pass
@@ -245,8 +245,8 @@ class RecordRespPlotter:
                         'signal_sw': sw_sig,
                         'RR_gt': current_hw_rpm,
                         'RR_BARTULA': current_sw_rpm,
-                        'BRV_gt': current_hw_brv,
-                        'BRV_BARTULA': current_sw_brv,
+                        'BBI_gt': current_hw_bbi,
+                        'BBI_BARTULA': current_sw_bbi,
                         'source': "webcam" if self.cam_choice == "B" else "drone"
                     })
 

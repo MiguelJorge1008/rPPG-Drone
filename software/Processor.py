@@ -215,13 +215,13 @@ class FaceProcessor:
         """
         freqs = np.fft.rfftfreq(len(bvp), d=1 / fs)
         power = np.abs(np.fft.rfft(bvp)) ** 2
-        band  = (freqs >= 0.75) & (freqs <= 4.0)
+        band  = (freqs >= 0.75) & (freqs <= 2.0)
         return freqs[band][np.argmax(power[band])] * 60
 
     @staticmethod
     def apply_filters(bvp, fs):
         """
-        Detrend + Butterworth bandpass [0.75-4.0 Hz].
+        Detrend + Butterworth bandpass [0.75-2.0 Hz].
         Pre/post-processing pipeline as per Face2PPG (Casado & Lopez, 2023).
 
         Parameters
@@ -240,7 +240,7 @@ class FaceProcessor:
         bvp   = np.dot(H - np.linalg.inv(H + 100 ** 2 * D.T @ D), bvp)
         nyq  = fs / 2
         lo   = max(0.75 / nyq, 0.001)
-        hi   = min(4.0  / nyq, 0.999)
+        hi   = min(2.0  / nyq, 0.999)
         b, a  = sp_signal.butter(2, [lo, hi], btype='bandpass')
         return sp_signal.filtfilt(b, a, bvp.astype(np.double))
 
