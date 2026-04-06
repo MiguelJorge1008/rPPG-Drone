@@ -146,6 +146,7 @@ def plot_rppg(df_sw, fname, out_dir, df_hw=None):
     if len(sw_peaks):
         ax.scatter(t_sw_dd[sw_peaks], sw_filt_n[sw_peaks],    color="darkgreen", s=28, zorder=5, marker="^", label=f"SW peaks ({len(sw_peaks)})")
     ax.set_ylabel("Amplitude (z-score)")
+    ax.set_xlabel("Time (s)")
     ax.set_title("Signals (z-score normalised) with detected peaks")
     ax.legend(fontsize=8, loc="upper right")
     ax.grid(True, alpha=0.3)
@@ -154,6 +155,7 @@ def plot_rppg(df_sw, fname, out_dir, df_hw=None):
         axes[1].plot(t_sw, df_sw["HR_gt"],  color="red",   lw=1.2, label="HR_gt  (hardware)")
     axes[1].plot(t_sw, df_sw[algo_col],     color="green", lw=1.2, label=f"{algo_col}  (camera)", alpha=0.8)
     axes[1].set_ylabel("BPM")
+    axes[1].set_xlabel("Time (s)")
     axes[1].set_title("Heart Rate over time")
     axes[1].legend(fontsize=8, loc="upper right")
     axes[1].grid(True, alpha=0.3)
@@ -238,6 +240,7 @@ def plot_resp(df_sw, fname, out_dir, df_hw=None):
     if len(sw_peaks):
         ax.scatter(t_sw_dd[sw_peaks], sw_filt_n[sw_peaks],    color="darkcyan", s=28, zorder=5, marker="^", label=f"SW peaks ({len(sw_peaks)})")
     ax.set_ylabel("Amplitude (z-score)")
+    ax.set_xlabel("Time (s)")
     ax.set_title("Signals (z-score normalised) with detected peaks")
     ax.legend(fontsize=8, loc="upper right")
     ax.grid(True, alpha=0.3)
@@ -246,6 +249,7 @@ def plot_resp(df_sw, fname, out_dir, df_hw=None):
         axes[1].plot(t_sw, df_sw["RR_gt"],     color="blue", lw=1.2, label="RR_gt  (hardware)")
     axes[1].plot(t_sw, df_sw["RR_BARTULA"],     color="cyan", lw=1.2, label="RR_BARTULA  (camera)", alpha=0.8)
     axes[1].set_ylabel("RPM")
+    axes[1].set_xlabel("Time (s)")
     axes[1].set_title("Respiration Rate over time")
     axes[1].legend(fontsize=8, loc="upper right")
     axes[1].grid(True, alpha=0.3)
