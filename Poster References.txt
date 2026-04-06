@@ -1,0 +1,4 @@
+[1]	World Health Organization, ‘Global health estimates: Leading causes of death’. Accessed: Apr. 06, 2026. [Online]. Available: https://www.who.int/data/gho/data/themes/mortality-and-global-health-estimates/ghe-leading-causes-of-death
+[2]	U. Debnath and S. Kim, ‘A comprehensive review of heart rate measurement using remote photoplethysmography and deep learning’, Biomed. Eng. OnLine, vol. 24, no. 1, p. 73, Jun. 2025, doi: 10.1186/s12938-025-01405-5.
+[3]	S. Sakib, Z. Hasan, and N. Roy, ‘A State-Of-The-Art Survey of Remote Photoplethysmography for Contactless Health Parameters Sensing’, WIREs Data Min. Knowl. Discov., vol. 15, no. 3, p. e70039, 2025, doi: 10.1002/widm.70039.
+
