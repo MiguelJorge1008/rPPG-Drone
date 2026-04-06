@@ -14,6 +14,7 @@ Usage:
 
 import os
 import sys
+import re
 import argparse
 import numpy as np
 import pandas as pd
@@ -77,7 +78,11 @@ def bandpass(sig, fs, lo, hi, order=2):
 
 def process_pair(sw_fname):
     """Returns (df_sw_out, df_hw_out, algo) or (None, None, None)."""
-    base  = sw_fname.replace("_sw.csv", "")
+    m = re.match(r'^(.+?)(_sw)((?:_[A-Za-z]+)*)\.csv$', sw_fname)
+    if not m:
+        print(f"  [SKIP] Cannot parse filename {sw_fname}")
+        return None, None, None
+    base, _, sw_extra = m.group(1), m.group(2), m.group(3)
     parts = base.split("_")
     # timestamp is the last all-digit part; algo is everything between BVP_ and it
     try:
@@ -86,7 +91,7 @@ def process_pair(sw_fname):
         print(f"  [SKIP] Cannot parse algo from {sw_fname}")
         return None, None, None
     algo     = "_".join(parts[1:ts_idx])
-    hw_fname = f"{base}_hw.csv"
+    hw_fname = f"{base}_hw{sw_extra}.csv"
 
     sw_path = os.path.join(DATA_DIR, sw_fname)
     hw_path = os.path.join(DATA_DIR, hw_fname)
@@ -270,7 +275,8 @@ def main():
     args = parser.parse_args()
 
     all_files = sorted(
-        f for f in os.listdir(DATA_DIR) if f.endswith("_sw.csv")
+        f for f in os.listdir(DATA_DIR)
+        if re.search(r'_sw(?:_[A-Za-z]+)?\.csv$', f)
     )
     if args.file:
         all_files = [args.file]
@@ -289,13 +295,14 @@ def main():
         df_sw_out, df_hw_out, algo = process_pair(sw_fname)
         if df_sw_out is None:
             continue
-        base = sw_fname.replace("_sw.csv", "")
+        m = re.match(r'^(.+?)(_sw)((?:_[A-Za-z]+)*)\.csv$', sw_fname)
+        base, sw_extra = m.group(1), m.group(3)
         _write_processed(df_sw_out,
-                         os.path.join(DATA_PROCESSED_DIR, f"{base}_sw_processed.csv"),
+                         os.path.join(DATA_PROCESSED_DIR, f"{base}_sw{sw_extra}_processed.csv"),
                          skip_cols=('timestamp', 'signal_sw'))
         if df_hw_out is not None:
             _write_processed(df_hw_out,
-                             os.path.join(DATA_PROCESSED_DIR, f"{base}_hw_processed.csv"),
+                             os.path.join(DATA_PROCESSED_DIR, f"{base}_hw{sw_extra}_processed.csv"),
                              skip_cols=('timestamp', 'signal_hw'))
         print(df_sw_out.tail(3).to_string(index=False))
 
@@ -304,13 +311,14 @@ def main():
         df_sw_out, df_hw_out = process_resp_pair(sw_fname)
         if df_sw_out is None:
             continue
-        base = sw_fname.replace("_sw.csv", "")
+        m = re.match(r'^(.+?)(_sw)((?:_[A-Za-z]+)*)\.csv$', sw_fname)
+        base, sw_extra = m.group(1), m.group(3)
         _write_processed(df_sw_out,
-                         os.path.join(DATA_PROCESSED_DIR, f"{base}_sw_processed.csv"),
+                         os.path.join(DATA_PROCESSED_DIR, f"{base}_sw{sw_extra}_processed.csv"),
                          skip_cols=('timestamp', 'signal_sw'))
         if df_hw_out is not None:
             _write_processed(df_hw_out,
-                             os.path.join(DATA_PROCESSED_DIR, f"{base}_hw_processed.csv"),
+                             os.path.join(DATA_PROCESSED_DIR, f"{base}_hw{sw_extra}_processed.csv"),
                              skip_cols=('timestamp', 'signal_hw'))
         print(df_sw_out.tail(3).to_string(index=False))
 

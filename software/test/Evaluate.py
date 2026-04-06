@@ -18,6 +18,7 @@ Usage:
 
 import os
 import sys
+import re
 import argparse
 import numpy as np
 import pandas as pd
@@ -185,6 +186,9 @@ def plot_rppg(df_sw, fname, out_dir, df_hw=None):
     ax2.grid(True, alpha=0.3)
     ax2.set_xlabel("Time (s)")
 
+    for ax in axes:
+        ax.tick_params(axis='x', labelbottom=True)
+
     _save_plot(fig, fname, out_dir)
 
 
@@ -270,6 +274,9 @@ def plot_resp(df_sw, fname, out_dir, df_hw=None):
     ax.set_title("Breath-to-Breath Intervals over time")
     ax.grid(True, alpha=0.3)
     ax.set_xlabel("Time (s)")
+
+    for ax in axes:
+        ax.tick_params(axis='x', labelbottom=True)
 
     _save_plot(fig, fname, out_dir)
 
@@ -518,7 +525,7 @@ def main():
 
     csv_files = [args.file] if args.file else sorted(
         f for f in os.listdir(RECORDINGS)
-        if f.endswith('_sw_processed.csv')
+        if re.search(r'_sw(?:_[A-Za-z]+)?_processed\.csv$', f)
     )
 
     if not csv_files:
@@ -540,7 +547,7 @@ def main():
             print(f"  [ERROR] {e}")
             continue
 
-        hw_fname = fname.replace("_sw_processed.csv", "_hw_processed.csv")
+        hw_fname = re.sub(r'_sw((?:_[A-Za-z]+)?)_processed\.csv$', r'_hw\1_processed.csv', fname)
         hw_path  = os.path.join(RECORDINGS, hw_fname)
         df_hw    = pd.read_csv(hw_path) if os.path.exists(hw_path) else None
 
