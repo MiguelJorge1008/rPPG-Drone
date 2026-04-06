@@ -300,15 +300,20 @@ python Evaluate.py --file BVP_GREEN_X_sw_processed.csv  # single file
 
 **Metrics:** MAE ± SD only.
 
-**Output — three tables:**
+**Output — four tables:**
 
 | Table | Content |
 |-------|---------|
-| Table 1 — HR | MAE±SD per algorithm (GREEN, OMIT, POS_WANG) |
-| Table 2 — RR | MAE±SD for BARTULA |
-| Table 3 — HRV | SDNN and RMSSD MAE±SD per algorithm |
+| Table 1 — Rate: standard algorithms | MAE±SD for HR (GREEN, OMIT, POS_WANG) and RR (BARTULA) |
+| Table 2 — Rate: motion/IMU compensation | MAE±SD for GREEN (with IMU) and LMS |
+| Table 3 — HRV + RRV: standard algorithms | SDNN, RMSSD (ms) and BBI (s) MAE±SD per algorithm |
+| Table 4 — HRV: motion/IMU compensation | SDNN and RMSSD MAE±SD for GREEN (with IMU) and LMS |
 
-**Plots:** per-recording signal + metrics overlay (SW vs HW), cropped to 0–60 s; saved to `results/`.
+Tables 2 and 4 only appear when IMU/LMS recordings are present.
+
+**Summary CSV:** `results/csv_raw/summary_metrics.csv` — all per-file results in tabular form.
+
+**Plots:** 3-subplot figure per recording (signals + peaks, rate over time, HRV/IBI over time), cropped to 0–60 s; saved to `results/`.
 
 ---
 

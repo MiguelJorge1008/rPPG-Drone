@@ -146,15 +146,22 @@ python RunTest.py
 2. **`Evaluate.py`** — reads `data_processed/`, interpolates hardware GT onto software timestamps, prints per-algorithm MAE±SD tables and saves plots to `results/`
 
 ```
-Table 1 — HR evaluation (MAE ± SD)
-  GREEN · OMIT · POS_WANG
+Table 1 — Rate: standard algorithms (MAE ± SD)
+  HR:  GREEN · OMIT · POS_WANG
+  RR:  BARTULA
 
-Table 2 — Respiratory rate evaluation (MAE ± SD)
-  BARTULA
+Table 2 — Rate: motion/IMU compensation (MAE ± SD)
+  GREEN (with IMU) · LMS
 
-Table 3 — HRV evaluation (SDNN / RMSSD MAE ± SD)
-  GREEN · OMIT · POS_WANG
+Table 3 — HRV + RRV: standard algorithms (MAE ± SD)
+  SDNN / RMSSD (ms):  GREEN · OMIT · POS_WANG
+  BBI (s):            BARTULA
+
+Table 4 — HRV: motion/IMU compensation (MAE ± SD)
+  GREEN (with IMU) · LMS
 ```
+
+Tables 2 and 4 only appear when IMU/LMS recordings are present.
 
 ## How It Works
 
