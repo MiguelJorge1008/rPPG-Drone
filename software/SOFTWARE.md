@@ -238,6 +238,7 @@ Hardware-synchronized recording and evaluation scripts.
 - Outputs to `data/`:
   - `BVP_<ALGO>_<ts>_sw.csv` — `timestamp`, `signal_sw` (z-normalised BVP)
   - `BVP_<ALGO>_<ts>_hw.csv` — `timestamp`, `signal_hw` (raw PPG, relative time)
+  - `BVP_<ALGO>_<ts>_sw_IMU.csv` / `_hw_IMU.csv` — same format, suffix `_IMU` indicates motion recording (used in Table 2 / Table 4 evaluation)
 - HW signal read via Serial (Arduino, `COM3`, 115200 baud)
 
 ---
@@ -261,9 +262,10 @@ python ComputeMetrics.py --file BVP_GREEN_X_sw.csv  # single pair
 **rPPG processing (`process_pair`):**
 - SW: cumulative expanding window; `metrics_from_peaks` → HR, SDNN, RMSSD per timestamp
 - HW: same, with bandpass filter [0.75–4.0 Hz] applied first
+- Supports `_IMU` suffix: `BVP_<ALGO>_<ts>_sw_IMU.csv` → `BVP_<ALGO>_<ts>_sw_IMU_processed.csv`
 - Outputs:
-  - `BVP_<ALGO>_<ts>_sw_processed.csv` — `timestamp`, `signal_sw`, `HR_<algo>`, `SDNN_<algo>`, `RMSSD_<algo>`
-  - `BVP_<ALGO>_<ts>_hw_processed.csv` — `timestamp`, `signal_hw`, `HR_gt`, `SDNN_gt`, `RMSSD_gt`
+  - `BVP_<ALGO>_<ts>_sw[_IMU]_processed.csv` — `timestamp`, `signal_sw`, `HR_<algo>`, `SDNN_<algo>`, `RMSSD_<algo>`
+  - `BVP_<ALGO>_<ts>_hw[_IMU]_processed.csv` — `timestamp`, `signal_hw`, `HR_gt`, `SDNN_gt`, `RMSSD_gt`
 
 **Respiratory processing (`process_resp_pair`):**
 - SW downsampled to 25 Hz before loop (avoids O(n²) at high acquisition rates)
